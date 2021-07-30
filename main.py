@@ -18,12 +18,14 @@ from tqdm import tqdm
 from audio_utils import transforms as audio_transforms
 from audio_utils import spectrogram_dataloader_pytorch as audio_datasets
 from audio_utils import loaders as audio_loaders
-from cnn import resnet_multigate
+from cnn import resnet_mg2
 from pytorch_extensions import dataset as image_datasets
 from pytorch_extensions import layers as custom_pytorch_layers
 from pytorch_extensions import sampler
 from pytorch_extensions import torch_utils
 from utils import utils
+
+from tinyknn import incremental_knn
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union, Tuple
 
@@ -83,11 +85,14 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
     parser.add_argument('--top_db', type=int, default=80,
                         help="Cut-off of decibels (default and suggested value is 80db).")
 
+    parser.add_argument('--do_incremental', action='store_true', help="Activate the incremental experiments.")
     parser.add_argument('--do_passive', action='store_true', help="Activate passive experiments.")
     parser.add_argument('--do_active', action='store_true', help="Activate active experiments.")
     parser.add_argument('--skip_base_exps', action='store_true', help="Skip the experiments with SVM and NN.")
     parser.add_argument('--skip_nn_exps', action='store_true', help="Skip the experiments with NN.")
 
+    parser.add_argument('--incremental_step', type=int, default=1,
+                        help="The number of samples to be added at each incremental step.")
     parser.add_argument('--cit_max_samples', type=int, default=10000,
                         help="The memory bound of CIT algorithm (measured as number of samples).")
     parser.add_argument('--samples_per_class_to_test', type=str, default="1,2,3,4,5,10,20,30,40,50,60,70,80,90,100",
@@ -160,13 +165,13 @@ def generate_dataloader(
         flags: argparse.Namespace,
         classes_before_change: List[str],
         classes_after_change: List[str]
-) -> Tuple[torch.utils.data.DataLoader, int, int]:
+) -> Tuple[torch.utils.data.DataLoader, torch.utils.data.Sampler, int, List[int]]:
     """
     The part of code that deals with the creation of the dataloader
     :param flags: the namespace of argparse with the parameters.
     :param classes_before_change:
     :param classes_after_change:
-    :return: a Tuple with the dataloader, the number of images, and the number of datasets.
+    :return: a Tuple with the dataloader, the sampler, the number of images, and the size of the datasets.
     """
     # Define the dataloader.
     splits_length = None
@@ -247,7 +252,7 @@ def generate_dataloader(
         num_workers=flags.num_readers
     )
     print(f"The number of samples within the dataset are {len(dataset)}")
-    return dataloader, len(dataset), len(splits_length) if splits_length else 1
+    return dataloader, batch_sampler, len(dataset), splits_length if splits_length else [len(dataset)]
 
 
 def identity_dimred_(x: np.ndarray):
@@ -394,7 +399,7 @@ def extract_training_features(
     :param training_features: the training features of shape (num_samples, features_size).
     :param training_labels: the training labels of shape (num_samples, ).
     :param num_samples_per_class: the number of samples
-    :return:
+    :return: the first samples of each class (and their labels) up to the desired number.
     """
     assert num_samples_per_class * np.size(np.unique(training_labels)) <= np.size(training_labels),\
         "The number of samples per class multiplied by the number of classes should be " \
@@ -405,7 +410,6 @@ def extract_training_features(
     idx_to_keep = [a[:num_samples_per_class] for a in idx_to_keep]
     # Join all the arrays together
     idx_to_keep = np.sort(np.concatenate(idx_to_keep))
-    # print(idx_to_keep)
     return training_features[idx_to_keep], training_labels[idx_to_keep]
 
 
@@ -420,11 +424,11 @@ def generate_cnn(
     :return: the pytorch based feature extractor.
     """
     if require_fix:
-        resnet_multigate.convert_weights_mapping(
+        resnet_mg2.convert_weights_mapping(
             flags.cnn_fe, flags.cnn_fe_weights_path, flags.cnn_fe_weights_path
         )
     if "resnet" in flags.cnn_fe:
-        base_cnn = resnet_multigate.load_resnet(
+        base_cnn = resnet_mg2.load_resnet(
             name=flags.cnn_fe,
             pretrained=True,
             requires_grad=False,
@@ -482,6 +486,10 @@ def main(flags: argparse.Namespace) -> None:
     for k in vars(flags):
         print('{} : {}'.format(k, vars(flags)[k]))
 
+    # Create output directory, if it does not exist
+    if not os.path.isdir(flags.output_dir):
+        os.mkdir(flags.output_dir)
+
     # Fix the seed.
     # todo: replace np.random.seed with a random_generator
     random.seed(flags.seed)
@@ -494,7 +502,7 @@ def main(flags: argparse.Namespace) -> None:
     classes_before_change, classes_after_change = generate_classes(flags)
 
     # Define the dataloader
-    dataloader, test_images, num_datasets = generate_dataloader(
+    dataloader, batch_sampler, test_images, datasets_splits = generate_dataloader(
         flags, classes_before_change, classes_after_change
     )
 
@@ -526,9 +534,10 @@ def main(flags: argparse.Namespace) -> None:
     print(f"The extracted features have a shape {features_shape} --> (size {features_size})")
 
     # Compute some constants
+    num_datasets = len(datasets_splits)
     num_test_samples = flags.base_test_samples * flags.num_classes * num_datasets
     num_test_dataloader_samples_to_skip = \
-        test_images - (num_test_samples // num_datasets)  # Skip only on the first dataset!
+        datasets_splits[0] - (num_test_samples // num_datasets)  # Skip only on the first dataset!
 
     samples_per_class_to_test = np.array(flags.samples_per_class_to_test.split(','), dtype=int)
     nn_lr0_to_test = np.array(flags.nn_lr_base.split(','), dtype=float)
@@ -539,6 +548,7 @@ def main(flags: argparse.Namespace) -> None:
     num_nn_inc_grid = len(nn_inc_names)
 
     num_comparisons = np.size(samples_per_class_to_test)
+    num_incremental_comparisons = np.max(samples_per_class_to_test) * flags.num_classes // flags.incremental_step
 
     # Define the features to be used in the following
     test_iterator = iter(dataloader)
@@ -553,6 +563,10 @@ def main(flags: argparse.Namespace) -> None:
         )
     print(f"Features extracted in {time.time() - start_time:.3f} seconds.")
 
+    ####################################################################################################################
+    # Base exps (they can be considered as incremental exps).
+    # In this experiment, the proposed solution along with other baseline classifiers is tested.
+    ####################################################################################################################
     # Define base samples data-structures
     accuracy = {
         "knn": np.zeros(num_comparisons),
@@ -582,10 +596,7 @@ def main(flags: argparse.Namespace) -> None:
         "nni": np.zeros(num_comparisons)
     }
     class_distance_filter_stats = np.zeros((num_comparisons, flags.class_distance_filters))
-
-    ####################################################################################################################
-    # Base exps (they can be considered as incremental exps)
-    ####################################################################################################################
+    # Start experiments
     if not flags.skip_base_exps:
         for ii, samples_per_class in enumerate(tqdm(samples_per_class_to_test)):
             # Extract the features with the current number of classes.
@@ -701,11 +712,11 @@ def main(flags: argparse.Namespace) -> None:
             errors_nn_ = np.zeros((num_nn_grid, num_test_samples))
             errors_nni_ = np.zeros((num_nn_inc_grid, num_test_samples))
 
-            # Skip training samples
+            # Skip training samples by updating the sampler
+            batch_sampler.update_start(start=num_test_dataloader_samples_to_skip)
             test_iterator = iter(dataloader)
-            # todo: skip iterations without loading data.
-            for _ in range(num_test_dataloader_samples_to_skip):
-                next(test_iterator)
+            # for _ in range(num_test_dataloader_samples_to_skip):
+            #     next(test_iterator)
 
             for jj in tqdm(range(num_test_samples)):
                 # Get the sample
@@ -813,6 +824,104 @@ def main(flags: argparse.Namespace) -> None:
                 os.path.join(flags.output_dir, f"class_distance_filter_stats_seed_{flags.seed}"),
                 class_distance_filter_stats
             )
+
+    ####################################################################################################################
+    # Incremental exps:
+    # Given two data-loaders, the incremental-TML solution learns from the training dataloader, then its accuracy
+    # capability is estimated with the testing dataloader.
+    # Needless to say, no sample belonging to the test dataloader is added to incremental-TML knowledge base.
+    #
+    # Observation: the training dataloader is not created, since the features after the feature extractor and the
+    # dimensionality reduction operator are already available.
+    ####################################################################################################################
+    # Define base samples data-structures
+    accuracy_incremental = {
+        "knn": np.zeros(num_incremental_comparisons)
+    }
+    predictions_incremental = {
+        "knn": np.zeros((num_incremental_comparisons, num_test_samples, flags.num_classes)),
+    }
+    if flags.do_incremental:
+        training_features, training_labels = \
+            extract_training_features(
+                training_features=training_features_all,
+                training_labels=training_labels_all,
+                num_samples_per_class=1
+            )
+        if dr_to_train:
+            dimred_, training_features, training_labels, fs_ = \
+                learn_dimred(
+                    dr_args=dr_args,
+                    train_features=training_features,
+                    train_labels=training_labels,
+                    num_classes=flags.num_classes,
+                    features_shape=features_shape
+                )
+            class_distance_filter_stats[ii] = fs_
+            # Define reduced features size
+            realtime_features_size = training_features.shape[1]
+        else:
+            # Define dimred as the identity.
+            dimred_ = identity_dimred_
+            # Set the value of realtime features size
+            realtime_features_size = features_size
+
+        # Create the incremental kNN object. The number of neighbors is automatically computed.
+        knn_ = incremental_knn.IncrementalTinyNearestNeighbor()
+        knn_.fit(x=training_features, y=training_labels)
+
+        # Compute the mask of all the training features to skip the already given samples
+        train_mask = np.all(np.isin(training_features_all, training_features), axis=1)
+        assert np.sum(train_mask) == flags.num_classes, "The train mask does not contain the correct number of True(s)."
+        train_mask = np.logical_not(train_mask)
+
+        # Loop over the other training samples.
+        # Warning: the last batch of training samples is not tested.
+        for ii, (ft_, lb_) in enumerate(zip(training_features_all[train_mask], training_labels_all[train_mask])):
+            # Test current kNN
+            if ii % flags.incremental_step == 0:
+                # At the first iteration it contains one sample per class.
+                errors_knn_ = np.zeros(num_test_samples)
+                # Init test iterator
+                batch_sampler.update_start(start=num_test_dataloader_samples_to_skip)
+                test_iterator = iter(dataloader)
+                # Loop over test samples.
+                for jj in tqdm(range(num_test_samples)):
+                    # Get the sample
+                    im_, lb_ = next(test_iterator)
+                    # Compute feature extractor + dimensionality reduction
+                    ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
+                    ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
+                    # KNN Classification (the incremental update is "disabled" by not providing the true label)
+                    pred_ = knn_.predict_proba(ft_)
+                    predicted_label = np.argmax(pred_)
+                    errors_knn_[jj] = (not predicted_label == lb_.data.numpy())
+                    predictions_incremental["knn"][ii // flags.incremental_step, jj] = pred_
+
+                accuracy_incremental["knn"][ii // flags.incremental_step] = 1 - np.sum(errors_knn_) / num_test_samples
+            # Incremental prediction
+            knn_.predict(ft_.reshape(1, -1), y_true=lb_)
+
+        # After the evaluation, the results are saved to file.
+        incremental_samples = np.arange(flags.num_classes, flags.num_classes * np.max(samples_per_class_to_test),
+                                        flags.incremental_step)
+        if np.size(incremental_samples) < num_incremental_comparisons:
+            incremental_samples.resize((num_incremental_comparisons, ))
+        df_ = pd.DataFrame( {
+            "samples": incremental_samples,
+            "a_knn": accuracy_incremental["knn"]
+        })
+        print("Incremental stats: ")
+        print(df_.tail())
+
+        df_.to_csv(
+            os.path.join(flags.output_dir, f"results_incremental_{flags.seed}.csv"),
+            float_format="%.3f"
+        )
+        np.save(
+            os.path.join(flags.output_dir, f"predictions_knn_incremental_seed_{flags.seed}"),
+            predictions_incremental["knn"]
+        )
 
 
 if __name__ == "__main__":

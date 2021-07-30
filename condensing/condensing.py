@@ -17,7 +17,7 @@ def create_knn(x: np.ndarray, y: np.ndarray, k_: Optional[int] = None) -> neighb
     :param k_: the number of neighbors (if None this values is computed automatically)
     :return: the kNN classifier fitted on the parameters.
     """
-    k_ = min(np.ceil(np.sqrt(x.shape[0])), x.shape[0]) if k_ is None else k_
+    k_ = int(min(np.ceil(np.sqrt(x.shape[0])), x.shape[0])) if k_ is None else k_
     return neighbors.KNeighborsClassifier(n_neighbors=k_).fit(x, y)
 
 

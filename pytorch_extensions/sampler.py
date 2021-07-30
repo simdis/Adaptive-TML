@@ -22,6 +22,7 @@ class SequentialSamplerWithOneShuffle(torch.utils.data.Sampler):
         """
         super(SequentialSamplerWithOneShuffle, self).__init__(data_source=data_source)
         self.data_source = data_source
+        self.start = 0
         if splits is None:
             self.sequence = [x for x in range(len(self.data_source))]
             # Shuffle the sequence
@@ -36,7 +37,15 @@ class SequentialSamplerWithOneShuffle(torch.utils.data.Sampler):
                 prev_ = next_
 
     def __iter__(self):
-        return iter(self.sequence)
+        return iter(self.sequence[self.start:])
 
     def __len__(self) -> int:
-        return len(self.data_source)
+        return len(self.data_source[self.start:])
+
+    def update_start(self, start: int) -> None:
+        """
+        Update the starting point in the Sampler.
+        :param start: an integer representing the index of the first element in the sequence to be sampled.
+        :return: Nothing.
+        """
+        self.start = start
