@@ -12,7 +12,7 @@ Please refer to the papers for details.
 
 ## Citation and Contact
 
-If you use our work, please also cite the paper:
+If you use our work, please also cite the paper(s):
 ```
 @inproceedings{disabato2020incremental,
   title={Incremental on-device tiny machine learning},
@@ -22,7 +22,17 @@ If you use our work, please also cite the paper:
   year={2020}
 }
 ```
-The citation of the other paper will be added soon.
+
+```
+@misc{disabato2021tiny,
+      title={Tiny Machine Learning for Concept Drift}, 
+      author={Simone Disabato and Manuel Roveri},
+      year={2021},
+      eprint={2107.14759},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
 
 ## Abstract Incremental On-Device Tiny Machine Learning
 > >  Tiny Machine Learning (TML) is a novel research area aiming at designing and developing Machine Learning (ML) techniques meant to be executed on Embedded Systems and Internet-of-Things (IoT) units. Such techniques, which take into account the constraints on computation, memory, and energy characterizing the hardware platform they operate on, exploit approximation and pruning mechanisms to reduce the computational load and the memory demand of Machine and Deep Learning (DL) algorithms.
