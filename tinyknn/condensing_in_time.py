@@ -1,5 +1,5 @@
 import numpy as np
-from condensed_nearest_neighbor import CondensedNearestNeighbor
+from tinyknn.condensed_nearest_neighbor import CondensedNearestNeighbor
 
 from typing import Optional
 
@@ -47,25 +47,18 @@ class CondensingInTimeNearestNeighbor(CondensedNearestNeighbor):
             self._x = self._x[samples_to_remove:, :]
             self._y = self._y[samples_to_remove:]
 
-    def _get_num_samples(self) -> int:
-        """
-        Internal method that counts the samples saved.
-        :return: the number of stored samples.
-        """
-        return np.size(self._y)
-
     def predict(self, x: np.ndarray, y_true: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Predict on a new incoming sample.
 
         WARNING. This method actually does not allow multiple predictions!
-        :param x: a numpy array of shape (n_features, )
+        :param x: a numpy array of shape (1, n_features)
         :param y_true: (optional to maintain compatibility w.r.t. scikit-learn).
         The supervised information of shape (1, ). It provided, allows a passive update of the kNN in case
         of wrong predictions.
         :return: a numpy array of shape (1, ) with the prediction.
         """
-        assert len(x.shape) == 1, "The predict method allows for one prediction at a time."
+        assert len(x.shape) == 2 and x.shape[0] == 1, "The predict method allows for one prediction at a time."
         assert y_true is None or np.size(y_true) == 1, "The predict method allows for one prediction at a time."
         # Predict y
         y = self._knn.predict(x)

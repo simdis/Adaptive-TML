@@ -44,6 +44,13 @@ class CondensedNearestNeighbor:
         else:
             self._knn = condensing.create_knn(self._x, self._y, k_=self._neighbors)
 
+    def _get_num_samples(self) -> int:
+        """
+        Internal method that counts the samples saved.
+        :return: the number of stored samples.
+        """
+        return np.size(self._y)
+
     def fit(self, x: np.ndarray, y: np.ndarray) -> None:
         """
         Fit the IncrementalTinyNearestNeighbor.
@@ -111,3 +118,10 @@ class CondensedNearestNeighbor:
         """
         _, idxs = self._knn.kneighbors(x)
         return self._y[idxs]
+
+    def get_knn_samples(self) -> int:
+        """
+        A function to get the number of samples within the kNN knowledge set.
+        :return: an integer representing the number of samples in the kNN knowledge set.
+        """
+        return self._get_num_samples()
