@@ -25,7 +25,7 @@ from pytorch_extensions import sampler
 from pytorch_extensions import torch_utils
 from utils import utils
 
-from tinyknn import incremental_knn
+from tinyknn import incremental_knn, condensed_nearest_neighbor, condensing_in_time
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union, Tuple
 
@@ -859,12 +859,12 @@ def main(flags: argparse.Namespace) -> None:
                 )
             class_distance_filter_stats[ii] = fs_
             # Define reduced features size
-            realtime_features_size = training_features.shape[1]
+            # realtime_features_size = training_features.shape[1]
         else:
             # Define dimred as the identity.
             dimred_ = identity_dimred_
             # Set the value of realtime features size
-            realtime_features_size = features_size
+            # realtime_features_size = features_size
 
         # Create the incremental kNN object. The number of neighbors is automatically computed.
         knn_ = incremental_knn.IncrementalTinyNearestNeighbor()
@@ -879,8 +879,8 @@ def main(flags: argparse.Namespace) -> None:
         # Warning: the last batch of training samples is not tested.
         for ii, (ft_, lb_) in enumerate(zip(training_features_all[train_mask], training_labels_all[train_mask])):
             # Test current kNN
+            # At the first iteration it contains one sample per class.
             if ii % flags.incremental_step == 0:
-                # At the first iteration it contains one sample per class.
                 errors_knn_ = np.zeros(num_test_samples)
                 # Init test iterator
                 batch_sampler.update_start(start=num_test_dataloader_samples_to_skip)
@@ -907,7 +907,7 @@ def main(flags: argparse.Namespace) -> None:
                                         flags.incremental_step)
         if np.size(incremental_samples) < num_incremental_comparisons:
             incremental_samples.resize((num_incremental_comparisons, ))
-        df_ = pd.DataFrame( {
+        df_ = pd.DataFrame({
             "samples": incremental_samples,
             "a_knn": accuracy_incremental["knn"]
         })
@@ -922,6 +922,155 @@ def main(flags: argparse.Namespace) -> None:
             os.path.join(flags.output_dir, f"predictions_knn_incremental_seed_{flags.seed}"),
             predictions_incremental["knn"]
         )
+
+    ####################################################################################################################
+    # Passive (CIT), Active, and Hybrid exps:
+    # The CIT algorithm passively updates over time, by adding the misclassified samples to its knowledge base.
+    # The Active algorithm relies on a CDT to detect changes and then adapt.
+    # The Hybrid mixes both the CIT and the Active.
+    ####################################################################################################################
+    accuracy_tiny = {
+        "cit": np.zeros(num_comparisons),
+        "c_knn": np.zeros(num_comparisons),
+    }
+    predictions_tiny = {
+        "cit": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
+        "c_knn": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
+    }
+    train_time_tiny = {
+        "cit": np.zeros(num_comparisons),
+        "c_knn": np.zeros(num_comparisons),
+    }
+    test_time_tiny = {
+        "dl": np.zeros(num_comparisons),
+        "fe_dr": np.zeros(num_comparisons),
+        "cit": np.zeros(num_comparisons),
+        "c_knn": np.zeros(num_comparisons),
+    }
+    samples_tiny = {
+        "c_knn": np.zeros((num_comparisons, num_test_samples + 1)),
+        "cit": np.zeros((num_comparisons, num_test_samples + 1)),
+    }
+    # Start experiments
+    if flags.do_passive or flags.do_active:
+        for ii, samples_per_class in enumerate(tqdm(samples_per_class_to_test)):
+            # Extract the features with the current number of classes.
+            training_features, training_labels = \
+                extract_training_features(
+                    training_features=training_features_all,
+                    training_labels=training_labels_all,
+                    num_samples_per_class=samples_per_class
+                )
+
+            # Train dimensionality reduction operator, if any.
+            if dr_to_train:
+                dimred_, training_features, training_labels, _ = \
+                    learn_dimred(
+                        dr_args=dr_args,
+                        train_features=training_features,
+                        train_labels=training_labels,
+                        num_classes=flags.num_classes,
+                        features_shape=features_shape
+                    )
+            else:
+                # Define dimred as the identity.
+                dimred_ = identity_dimred_
+
+            # Create the permutation indices (to have all equals in all the objects)
+            perm_idxs = np.random.permutation(training_features.shape[0])
+
+            if flags.do_passive:
+                # Create the condensed kNN object. The number of neighbors is automatically computed.
+                start_time = time.time()
+                c_knn_ = condensed_nearest_neighbor.CondensedNearestNeighbor(
+                    shuffle=True,
+                    perm_idxs=perm_idxs
+                )
+                c_knn_.fit(training_features, training_labels)
+                train_time_tiny["c_knn"] = time.time() - start_time
+                samples_tiny["c_knn"] = c_knn_.get_knn_samples()
+                # Create the cit object
+                start_time = time.time()
+                cit_ = condensing_in_time.CondensingInTimeNearestNeighbor(
+                    shuffle=True,
+                    perm_idxs=perm_idxs,
+                    max_samples=flags.cit_max_samples
+                )
+                cit_.fit(training_features, training_labels)
+                train_time_tiny["cit"] = time.time() - start_time
+                samples_tiny["cit"] = cit_.get_knn_samples()
+
+                # Test Arrays
+                errors_c_knn_ = np.zeros(num_test_samples)
+                errors_cit_ = np.zeros(num_test_samples)
+            # Skip training samples by updating the sampler
+            batch_sampler.update_start(start=num_test_dataloader_samples_to_skip)
+            test_iterator = iter(dataloader)
+
+            for jj in tqdm(range(num_test_samples)):
+                # Get the sample
+                st_time = time.time()
+                im_, lb_ = next(test_iterator)
+                test_time_tiny["dl"][ii] += time.time() - st_time
+                # Compute feature extractor + dimensionality reduction
+                st_time = time.time()
+                ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
+                ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
+                test_time_tiny["fe_dr"] += time.time() - st_time
+
+                if flags.do_passive:
+                    # Predict condensed knn
+                    st_time = time.time()
+                    predicted_label = c_knn_.predict(ft_)
+                    errors_c_knn_[jj] = (not predicted_label == lb_.data.numpy())
+                    test_time_tiny["c_knn"][ii] += time.time() - st_time
+                    predictions_tiny["c_knn"][ii, jj] = c_knn_.predict_proba(ft_)
+                    # Predict passive
+                    st_time = time.time()
+                    predicted_label = cit_.predict(ft_)
+                    errors_cit_[jj] = (not predicted_label == lb_.data.numpy())
+                    test_time_tiny["cit"][ii] += time.time() - st_time
+                    predictions_tiny["cit"][ii, jj] = cit_.predict_proba(ft_)
+            # Save results
+            if flags.do_passive:
+                accuracy_tiny["c_knn"][ii] = 1 - np.sum(errors_c_knn_) / num_test_samples
+                accuracy_tiny["cit"][ii] = 1 - np.sum(errors_cit_) / num_test_samples
+
+            # Remove useless data structures.
+            del training_features
+            del training_labels
+            if flags.do_passive:
+                del c_knn_
+                del cit_
+
+        # After the evaluation, the results are saved to file.
+        o_dict_tiny = {
+            "samples_per_class": samples_per_class_to_test,
+            "a_c_knn": accuracy_tiny["c_knn"],
+            "a_cit": accuracy_tiny["cit"]
+        }
+        for ii, alg_name in enumerate(train_time_tiny):
+            o_dict_tiny[f"tr_{alg_name}"] = train_time_tiny[alg_name]
+        for ii, alg_name in enumerate(test_time_tiny):
+            o_dict_tiny[f"te_{alg_name}"] = test_time_tiny[alg_name]
+
+        df_tiny = pd.DataFrame(o_dict_tiny)
+        print("Tiny Accuracy stats: ")
+        print(df_tiny.tail())
+
+        df_tiny.to_csv(
+            os.path.join(flags.output_dir, f"results_tiny_{flags.seed}.csv"),
+            float_format="%.3f"
+        )
+        for alg_name in predictions_tiny:
+            np.save(
+                os.path.join(flags.output_dir, f"predictions_{alg_name}_seed_{flags.seed}"),
+                predictions_tiny[alg_name]
+            )
+            np.save(
+                os.path.join(flags.output_dir, f"samples_{alg_name}_seed_{flags.seed}"),
+                samples_tiny[alg_name]
+            )
 
 
 if __name__ == "__main__":
