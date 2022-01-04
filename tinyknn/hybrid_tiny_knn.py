@@ -1,7 +1,7 @@
 import numpy as np
 from condensing import condensing
-import active_cdt_functions
-from active_tiny_knn import AdaptiveNearestNeighbor
+from tinyknn import active_cdt_functions
+from tinyknn.active_tiny_knn import AdaptiveNearestNeighbor
 
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -21,7 +21,7 @@ class AdaptiveHybridNearestNeighbor(AdaptiveNearestNeighbor):
         use_condensing: bool = True, shuffle: bool = True,
         perm_idxs: Optional[np.ndarray] = None, _verbose: bool = False,
         cdt_metric: str = 'accuracy', adaptation_mode: str = 'fast', min_samples_to_restart: int = 5,
-        cdt_init_fn: Callable[[Any, ...], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] =
+        cdt_init_fn: Callable[..., Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] =
         active_cdt_functions.initialize_cusum_cdt_accuracy,
         cdt_init_kwargs: Optional[Dict[str, Any]] = None
     ) -> None:
@@ -61,7 +61,8 @@ class AdaptiveHybridNearestNeighbor(AdaptiveNearestNeighbor):
             perm_idxs=perm_idxs, _verbose=_verbose,
             cdt_metric=cdt_metric, adaptation_mode=adaptation_mode,
             min_samples_to_restart=min_samples_to_restart,
-            cdt_init_fn=cdt_init_fn, **cdt_init_kwargs
+            cdt_init_fn=cdt_init_fn,
+            cdt_init_kwargs=cdt_init_kwargs
         )
         # History window: add time information
         self._last_window_time = None

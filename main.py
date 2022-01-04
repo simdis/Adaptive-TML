@@ -25,7 +25,8 @@ from pytorch_extensions import sampler
 from pytorch_extensions import torch_utils
 from utils import utils
 
-from tinyknn import incremental_knn, condensed_nearest_neighbor, condensing_in_time
+from tinyknn import active_tiny_knn, hybrid_tiny_knn, incremental_knn, condensed_nearest_neighbor, condensing_in_time, \
+    active_cdt_functions
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union, Tuple
 
@@ -95,6 +96,9 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
                         help="The number of samples to be added at each incremental step.")
     parser.add_argument('--cit_max_samples', type=int, default=10000,
                         help="The memory bound of CIT algorithm (measured as number of samples).")
+    parser.add_argument('--window_length', type=int,
+                        help="The size of the history window in Active Tiny kNN or the training window "
+                             "in Hybrid Tiny kNN (default: --cit_max_samples).")
     parser.add_argument('--samples_per_class_to_test', type=str, default="1,2,3,4,5,10,20,30,40,50,60,70,80,90,100",
                         help="The comma separated list of initial training set sizes to be tested. Each value "
                              "corresponds to the number of samples per each class.")
@@ -123,7 +127,10 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
 
     # Return the parser or the parsed values according to the parameter 'parse'.
     if parse:
-        return parser.parse_args()
+        args = parser.parse_args()
+        # Fix default values based on other arguments.
+        args.window_length = args.window_length if args.window_length else args.cit_max_samples
+        return args
     return parser
 
 
@@ -798,9 +805,9 @@ def main(flags: argparse.Namespace) -> None:
             "a_knn": accuracy["knn"],
             "a_svm": accuracy["svm"]
         }
-        for ii, alg_name in enumerate(train_time):
+        for alg_name in train_time:
             o_dict[f"tr_{alg_name}"] = train_time[alg_name]
-        for ii, alg_name in enumerate(test_time):
+        for alg_name in test_time:
             o_dict[f"te_{alg_name}"] = test_time[alg_name]
         for ii, alg_name in enumerate(nn_base_names):
             o_dict[f"a_nn_{alg_name}"] = accuracy["nn"][ii]
@@ -929,6 +936,23 @@ def main(flags: argparse.Namespace) -> None:
     # The Active algorithm relies on a CDT to detect changes and then adapt.
     # The Hybrid mixes both the CIT and the Active.
     ####################################################################################################################
+    # Define Active Tiny kNN and Hybrid Tiny kNN configurations to test
+    # todo: make this choice available in FLAGS!
+    active_cases = ['accuracy_fast_condensing', 'accuracy_fast', 'confidence_fast_condensing', 'confidence_fast']
+    num_active_cases = len(active_cases)
+
+    thresholds_to_test = np.array([10, 20, 25, 50, 100])
+    hybrid_names = ['accuracy_fast', 'confidence_fast']
+    condensing_suffix = ['_condensing', '']
+    hybrid_cases = ['{}_{}_{}'.format(nn, cc, tr) for nn in hybrid_names for cc in condensing_suffix for tr in
+                    thresholds_to_test if not (nn == 'confidence_fast' and tr < 50)]
+    num_hybrid_cases = len(hybrid_cases)
+
+    # Fix window length: the maximum value is number of samples per class times the number of classes.
+    w_len = np.max(samples_per_class_to_test) * flags.num_classes
+    if flags.window_length < w_len:
+        w_len = flags.window_length
+
     accuracy_tiny = {
         "cit": np.zeros(num_comparisons),
         "c_knn": np.zeros(num_comparisons),
@@ -936,6 +960,10 @@ def main(flags: argparse.Namespace) -> None:
     predictions_tiny = {
         "cit": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
         "c_knn": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
+    }
+    errors_tiny = {
+        "cit": np.zeros((num_comparisons, num_test_samples)),
+        "c_knn": np.zeros((num_comparisons, num_test_samples)),
     }
     train_time_tiny = {
         "cit": np.zeros(num_comparisons),
@@ -951,6 +979,33 @@ def main(flags: argparse.Namespace) -> None:
         "c_knn": np.zeros((num_comparisons, num_test_samples + 1)),
         "cit": np.zeros((num_comparisons, num_test_samples + 1)),
     }
+    if flags.do_active:
+        accuracy_tiny["active"] = np.zeros((num_active_cases, num_comparisons))
+        accuracy_tiny["hybrid"] = np.zeros((num_hybrid_cases, num_comparisons))
+        predictions_tiny["active"] = np.zeros((num_active_cases, num_comparisons, num_test_samples, flags.num_classes))
+        predictions_tiny["hybrid"] = np.zeros((num_hybrid_cases, num_comparisons, num_test_samples, flags.num_classes))
+        errors_tiny["active"] = np.zeros((num_active_cases, num_comparisons, num_test_samples))
+        errors_tiny["hybrid"] = np.zeros((num_hybrid_cases, num_comparisons, num_test_samples))
+        train_time_tiny["active"] = np.zeros((num_active_cases, num_comparisons))
+        train_time_tiny["hybrid"] = np.zeros((num_hybrid_cases, num_comparisons))
+        test_time_tiny["active"] = np.zeros((num_active_cases, num_comparisons))
+        test_time_tiny["hybrid"] = np.zeros((num_hybrid_cases, num_comparisons))
+        samples_tiny["active"] = np.zeros((num_active_cases, num_comparisons, num_test_samples + 1))
+        samples_tiny["hybrid"] = np.zeros((num_hybrid_cases, num_comparisons, num_test_samples + 1))
+
+        cdt_metric_tiny = {
+            "active": np.zeros((num_active_cases, num_comparisons, num_test_samples)),
+            "hybrid": np.zeros((num_hybrid_cases, num_comparisons, num_test_samples)),
+        }
+        cdt_detection_tiny = {
+            "active": np.zeros((num_active_cases, num_comparisons, num_test_samples)),
+            "hybrid": np.zeros((num_hybrid_cases, num_comparisons, num_test_samples)),
+        }
+        cdt_refined_tiny = {
+            "active": np.zeros((num_active_cases, num_comparisons, num_test_samples)),
+            "hybrid": np.zeros((num_hybrid_cases, num_comparisons, num_test_samples)),
+        }
+
     # Start experiments
     if flags.do_passive or flags.do_active:
         for ii, samples_per_class in enumerate(tqdm(samples_per_class_to_test)):
@@ -988,7 +1043,7 @@ def main(flags: argparse.Namespace) -> None:
                 )
                 c_knn_.fit(training_features, training_labels)
                 train_time_tiny["c_knn"] = time.time() - start_time
-                samples_tiny["c_knn"] = c_knn_.get_knn_samples()
+                samples_tiny["c_knn"][ii, 0] = c_knn_.get_knn_samples()
                 # Create the cit object
                 start_time = time.time()
                 cit_ = condensing_in_time.CondensingInTimeNearestNeighbor(
@@ -998,11 +1053,69 @@ def main(flags: argparse.Namespace) -> None:
                 )
                 cit_.fit(training_features, training_labels)
                 train_time_tiny["cit"] = time.time() - start_time
-                samples_tiny["cit"] = cit_.get_knn_samples()
+                samples_tiny["cit"][ii, 0] = cit_.get_knn_samples()
 
-                # Test Arrays
-                errors_c_knn_ = np.zeros(num_test_samples)
-                errors_cit_ = np.zeros(num_test_samples)
+            if flags.do_active:
+                # Create the various active Tiny kNN objects.
+                active_tiny_knn_list = list()
+                active_tiny_knn_idx = 0
+                cdt_metric_list = ['accuracy', 'confidence']
+                cdt_metric_init_fn_list = [
+                    active_cdt_functions.initialize_cusum_cdt_accuracy,
+                    active_cdt_functions.initialize_cusum_cdt_change_normal_mean
+                ]
+                _adaptation_mode = 'fast'
+                for _cdt_metric, _cdt_init_fn in zip(cdt_metric_list, cdt_metric_init_fn_list):
+                    for _condensing in [True, False]:
+                        # Create and fit the object
+                        start_time = time.time()
+                        kac_ = active_tiny_knn.AdaptiveNearestNeighbor(
+                            history_window_length=w_len,
+                            step_size=flags.n_binomial,
+                            use_condensing=_condensing,
+                            perm_idxs=perm_idxs,
+                            cdt_metric=_cdt_metric,
+                            adaptation_mode=_adaptation_mode,
+                            cdt_init_fn=_cdt_init_fn
+                        )
+                        kac_.fit(training_features, training_labels)
+                        train_time_tiny["active"][active_tiny_knn_idx] = time.time() - start_time
+                        samples_tiny["active"][active_tiny_knn_idx] = kac_.get_knn_samples()
+                        # Add the object to the list
+                        active_tiny_knn_list.append(kac_)
+                        active_tiny_knn_idx += 1
+
+                # Create the various hybrid Tiny kNN objects.
+                hybrid_tiny_knn_list = list()
+                hybrid_tiny_knn_idx = 0
+                # Note that cdt_metric_list, etc are the same of active case
+                cdt_arguments_dict_list = [{"allow_above_p0": False}, {"allow_above_mu0": False}]
+                for _cdt_metric, _cdt_init_fn, _cdt_args in zip(
+                        cdt_metric_list, cdt_metric_init_fn_list, cdt_arguments_dict_list
+                ):
+                    for _condensing in [True, False]:
+                        for _threshold in thresholds_to_test:
+                            if not _cdt_metric == 'confidence' and _threshold < 50:
+                                # Create and fit the object
+                                start_time = time.time()
+                                kac_ = hybrid_tiny_knn.AdaptiveHybridNearestNeighbor(
+                                    window_length=w_len,
+                                    cdt_threshold=_threshold,
+                                    step_size=flags.n_binomial,
+                                    use_condensing=_condensing,
+                                    perm_idxs=perm_idxs,
+                                    cdt_metric=_cdt_metric,
+                                    adaptation_mode=_adaptation_mode,
+                                    cdt_init_fn=_cdt_init_fn,
+                                    cdt_init_kwargs=_cdt_args
+                                )
+                                kac_.fit(training_features, training_labels)
+                                train_time_tiny["hybrid"][hybrid_tiny_knn_idx] = time.time() - start_time
+                                samples_tiny["hybrid"][hybrid_tiny_knn_idx] = kac_.get_knn_samples()
+                                # Add the object to the list
+                                hybrid_tiny_knn_list.append(kac_)
+                                hybrid_tiny_knn_idx += 1
+
             # Skip training samples by updating the sampler
             batch_sampler.update_start(start=num_test_dataloader_samples_to_skip)
             test_iterator = iter(dataloader)
@@ -1022,19 +1135,53 @@ def main(flags: argparse.Namespace) -> None:
                     # Predict condensed knn
                     st_time = time.time()
                     predicted_label = c_knn_.predict(ft_)
-                    errors_c_knn_[jj] = (not predicted_label == lb_.data.numpy())
                     test_time_tiny["c_knn"][ii] += time.time() - st_time
+                    # errors_c_knn_[jj] = (not predicted_label == lb_.data.numpy())
+                    errors_tiny["cit"][ii, jj] = (not predicted_label == lb_.data.numpy())
                     predictions_tiny["c_knn"][ii, jj] = c_knn_.predict_proba(ft_)
+                    samples_tiny["c_knn"][ii, jj] = c_knn_.get_knn_samples()
                     # Predict passive
                     st_time = time.time()
                     predicted_label = cit_.predict(ft_)
-                    errors_cit_[jj] = (not predicted_label == lb_.data.numpy())
                     test_time_tiny["cit"][ii] += time.time() - st_time
+                    # errors_cit_[jj] = (not predicted_label == lb_.data.numpy())
+                    errors_tiny["cit"][ii, jj] = (not predicted_label == lb_.data.numpy())
                     predictions_tiny["cit"][ii, jj] = cit_.predict_proba(ft_)
+                    samples_tiny["cit"][ii, jj] = cit_.get_knn_samples()
+                if flags.do_active:
+                    # Active and hybrid inner loop:
+                    for _key, _list in zip(["active", "hybrid"], [active_tiny_knn_list, hybrid_tiny_knn_list]):
+                        for kk, kac_ in enumerate(_list):
+                            # Predict the probabilities always before the "classic" predict because the latter handles
+                            # the adaptation of the model.
+                            pred_proba = kac_.predict_proba(ft_)
+                            st_time = time.time()
+                            # Check if there is a prediction for each class: fill with -1 otherwise
+                            if np.size(pred_proba) < flags.num_classes:
+                                pred_proba = np.append(pred_proba, -1 * np.ones(flags.num_classes - np.size(pred_proba)))
+                            pred_lbs_ = kac_.predict(ft_, y_true=lb_.data.numpy())
+                            test_time_tiny[_key][ii] += time.time() - st_time
+                            # errors_active[kk, jj] = (not pred_lbs_ == lb_.data.numpy())
+                            errors_tiny[_key][kk, ii, jj] = (not pred_lbs_ == lb_.data.numpy())
+                            predictions_tiny[_key][kk, ii, jj] = pred_proba
+                            samples_tiny[_key][kk, ii, jj] = kac_.get_knn_samples()
+
             # Save results
             if flags.do_passive:
-                accuracy_tiny["c_knn"][ii] = 1 - np.sum(errors_c_knn_) / num_test_samples
-                accuracy_tiny["cit"][ii] = 1 - np.sum(errors_cit_) / num_test_samples
+                accuracy_tiny["c_knn"][ii] = 1 - np.sum(errors_tiny["c_knn"][ii]) / num_test_samples
+                accuracy_tiny["cit"][ii] = 1 - np.sum(errors_tiny["cit"][ii]) / num_test_samples
+
+            if flags.do_active:
+                accuracy_tiny["active"][:, ii] = 1 - np.sum(errors_tiny["active"][:, ii], axis=1) / num_test_samples
+                accuracy_tiny["hybrid"][:, ii] = 1 - np.sum(errors_tiny["hybrid"][:, ii], axis=1) / num_test_samples
+
+                for _key, _list in zip(["active", "hybrid"], [active_tiny_knn_list, hybrid_tiny_knn_list]):
+                    for kk, kac_ in enumerate(_list):
+                        cdt_metric = kac_.get_cdt_metric_history()
+                        cdt_metric_tiny[_key][kk, ii, :np.size(cdt_metric)] = cdt_metric
+                        # Save detections with -1 since the indices start from zero and not 1 :)
+                        cdt_detection_tiny[_key][kk, ii, kac_.get_detections() - 1] = 1
+                        cdt_refined_tiny[_key][kk, ii, kac_.get_estimated_change_times() - 1] = 1
 
             # Remove useless data structures.
             del training_features
@@ -1042,6 +1189,9 @@ def main(flags: argparse.Namespace) -> None:
             if flags.do_passive:
                 del c_knn_
                 del cit_
+            if flags.do_active:
+                active_tiny_knn_list.clear()
+                hybrid_tiny_knn_list.clear()
 
         # After the evaluation, the results are saved to file.
         o_dict_tiny = {
@@ -1049,10 +1199,22 @@ def main(flags: argparse.Namespace) -> None:
             "a_c_knn": accuracy_tiny["c_knn"],
             "a_cit": accuracy_tiny["cit"]
         }
-        for ii, alg_name in enumerate(train_time_tiny):
-            o_dict_tiny[f"tr_{alg_name}"] = train_time_tiny[alg_name]
-        for ii, alg_name in enumerate(test_time_tiny):
-            o_dict_tiny[f"te_{alg_name}"] = test_time_tiny[alg_name]
+        for alg_name in train_time_tiny:
+            if alg_name not in ["active", "hybrid"]:
+                o_dict_tiny[f"tr_{alg_name}"] = train_time_tiny[alg_name]
+        for alg_name in test_time_tiny:
+            if alg_name not in ["active", "hybrid"]:
+                o_dict_tiny[f"te_{alg_name}"] = test_time_tiny[alg_name]
+        # Deal with multiple options of active and hybrid algorithms
+        if flags.do_active:
+            for ii, alg_name in enumerate(active_cases):
+                o_dict_tiny[f"a_active_{alg_name}"] = accuracy_tiny["active"][ii]
+                o_dict_tiny[f"tr_active_{alg_name}"] = train_time_tiny["active"][ii]
+                o_dict_tiny[f"te_active_{alg_name}"] = test_time_tiny["active"][ii]
+            for ii, alg_name in enumerate(hybrid_cases):
+                o_dict_tiny[f"a_hybrid_{alg_name}"] = accuracy_tiny["hybrid"][ii]
+                o_dict_tiny[f"tr_hybrid_{alg_name}"] = train_time_tiny["hybrid"][ii]
+                o_dict_tiny[f"te_hybrid_{alg_name}"] = test_time_tiny["hybrid"][ii]
 
         df_tiny = pd.DataFrame(o_dict_tiny)
         print("Tiny Accuracy stats: ")
@@ -1071,6 +1233,19 @@ def main(flags: argparse.Namespace) -> None:
                 os.path.join(flags.output_dir, f"samples_{alg_name}_seed_{flags.seed}"),
                 samples_tiny[alg_name]
             )
+            if alg_name in cdt_metric_tiny:
+                np.save(
+                    os.path.join(flags.output_dir, f"cdt_metric_{alg_name}_seed_{flags.seed}"),
+                    cdt_metric_tiny[alg_name]
+                )
+                np.save(
+                    os.path.join(flags.output_dir, f"cdt_detection_{alg_name}_seed_{flags.seed}"),
+                    cdt_detection_tiny[alg_name]
+                )
+                np.save(
+                    os.path.join(flags.output_dir, f"cdt_refined_{alg_name}_seed_{flags.seed}"),
+                    cdt_refined_tiny[alg_name]
+                )
 
 
 if __name__ == "__main__":
