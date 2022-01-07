@@ -15,6 +15,7 @@ import time
 
 from tqdm import tqdm
 
+import synthetic_dataset.synthetic_dataset
 from audio_utils import transforms as audio_transforms
 from audio_utils import spectrogram_dataloader_pytorch as audio_datasets
 from audio_utils import loaders as audio_loaders
@@ -87,6 +88,25 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
     parser.add_argument('--hop_length', type=int, default=-1)
     parser.add_argument('--top_db', type=int, default=80,
                         help="Cut-off of decibels (default and suggested value is 80db).")
+    parser.add_argument('--is_synthetic', action='store_true',
+                        help="Boolean flag that forces to use a synthetic dataset "
+                        "(the path to dataset in this case is ignored).")
+    parser.add_argument('--grid_size', type=int, default=4,
+                        help="The size of the synthetic dataset squares.")
+    parser.add_argument('--concept_drift_magnitude_mean', type=str, default="0",
+                        help="The comma separated magnitude of change per each class mean or a single value for all.")
+    parser.add_argument('--concept_drift_magnitude_cov', type=str, default="0",
+                        help="The comma separated magnitude of change per each class cov or a single value for all.")
+    parser.add_argument('--concept_drift_time', type=int, default=1,
+                        help="The number of steps in which the concept drift occurs (1=abrupt, >1=gradual).")
+    parser.add_argument('--synthetic_classes_mean_scale', type=str, default="1.0",
+                        help="The comma separated width of possible mean values for each class.")
+    parser.add_argument('--synthetic_classes_mean_min', type=str, default="0.0",
+                        help="The comma separated minimum possible mean values for each class.")
+    parser.add_argument('--synthetic_classes_cov_scale', type=str, default="1.0",
+                        help="The comma separated width of possible cov values for each class.")
+    parser.add_argument('--synthetic_classes_cov_min', type=str, default="1.0",
+                        help="The comma separated minimum possible cov values for each class.")
 
     parser.add_argument('--do_incremental', action='store_true', help="Activate the incremental experiments.")
     parser.add_argument('--do_passive', action='store_true', help="Activate passive experiments.")
@@ -142,7 +162,7 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
 
 
 def generate_classes(
-     flags: argparse.Namespace
+    flags: argparse.Namespace
 ) -> Tuple[List[str], List[str]]:
     """
     Part of code that generates the classes.
@@ -188,8 +208,56 @@ def generate_dataloader(
     :return: a Tuple with the dataloader, the sampler, the number of images, and the size of the datasets.
     """
     # Define the dataloader.
+    # dataset = None
     splits_length = None
-    if flags.is_audio:
+    if flags.is_synthetic:
+        class_mean_scale = np.array(flags.synthetic_classes_mean_scale.split(','))
+        class_mean_min = np.array(flags.synthetic_classes_mean_min.split(','))
+        class_cov_scale = np.array(flags.synthetic_classes_cov_scale.split(','))
+        class_cov_min = np.array(flags.synthetic_classes_cov_min.split(','))
+        if len(class_mean_scale) == 1:
+            class_mean_scale = float(class_mean_scale)
+        if len(class_mean_min) == 1:
+            class_mean_min = float(class_mean_min)
+        if len(class_cov_scale) == 1:
+            class_cov_scale = float(class_cov_scale)
+        if len(class_cov_min) == 1:
+            class_cov_min = float(class_cov_min)
+        mean_change_magnitude = flags.concept_drift_magnitude_mean.split(',')
+        cov_change_magnitude = flags.concept_drift_magnitude_cov.split(',')
+        if len(mean_change_magnitude) == 1:
+            mean_change_magnitude = float(mean_change_magnitude[0])
+        elif len(mean_change_magnitude) == flags.num_classes:
+            mean_change_magnitude = np.array(mean_change_magnitude).reshape((flags.num_classes, ))
+        else:
+            mean_change_magnitude = np.array(mean_change_magnitude).reshape(
+                (flags.grid_size, flags.grid_size, flags.num_classes)
+            )
+        if len(cov_change_magnitude) == 1:
+            cov_change_magnitude = float(cov_change_magnitude[0])
+        elif len(cov_change_magnitude) == flags.num_classes:
+            cov_change_magnitude = np.array(cov_change_magnitude).reshape((flags.num_classes, ))
+        else:
+            cov_change_magnitude = np.array(mean_change_magnitude).reshape(
+                (flags.grid_size * flags.grid_size, flags.grid_size * flags.grid_size, flags.num_classes)
+            )
+        dataset = synthetic_dataset.synthetic_dataset.SyntheticMultivariateNormalGridDataset(
+            grid_size=flags.grid_size,
+            num_classes=flags.num_classes,
+            dataset_size=flags.base_test_samples * flags.num_classes * 2,
+            mean_change_magnitude=mean_change_magnitude,
+            mean_change_duration=flags.concept_drift_time,
+            cov_change_magnitude=cov_change_magnitude,
+            cov_change_duration=flags.concept_drift_time,
+            change_beginning=flags.base_test_samples * flags.num_classes,
+            mean_scale=class_mean_scale,
+            mean_min=class_mean_min,
+            cov_scale=class_cov_scale,
+            cov_min=class_cov_min,
+            seed=flags.seed * 20,
+            transform=audio_transforms.SpectrogramToColormapTransform()
+        )
+    elif flags.is_audio:
         # Create the audio transform
         audio_transform = audio_transforms.spectrogram_transforms(
             n_fft=flags.n_fft,
@@ -557,7 +625,9 @@ def main(flags: argparse.Namespace) -> None:
     )
 
     # Compute features size
-    if flags.is_audio:
+    if flags.is_synthetic:
+        input_shape = (3, flags.grid_size, flags.grid_size)
+    elif flags.is_audio:
         input_shape, _ = next(iter(dataloader))
         input_shape = input_shape.shape[1:]
     else:
