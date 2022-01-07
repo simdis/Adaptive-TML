@@ -28,6 +28,8 @@ from utils import utils
 from tinyknn import active_tiny_knn, hybrid_tiny_knn, incremental_knn, condensed_nearest_neighbor, condensing_in_time, \
     active_cdt_functions
 
+import river
+
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union, Tuple
 
 
@@ -73,7 +75,7 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
                         help="The path to the dataset")
     parser.add_argument('--second_data_dir', type=str, default=None,
                         help="The (optional) path to a second dataset. If provided, is used after the change."
-                        " It is assumed that the classes are the same in both the datasets.")
+                             " It is assumed that the classes are the same in both the datasets.")
 
     parser.add_argument('--output_dir', type=str, default='./output/')
 
@@ -91,6 +93,11 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
     parser.add_argument('--do_active', action='store_true', help="Activate active experiments.")
     parser.add_argument('--skip_base_exps', action='store_true', help="Skip the experiments with SVM and NN.")
     parser.add_argument('--skip_nn_exps', action='store_true', help="Skip the experiments with NN.")
+
+    parser.add_argument('--do_knn_adwin', action='store_true', help="Test against the kNN+ADWIN method.")
+    parser.add_argument('--do_knn_adwin_paw', action='store_true',
+                        help="Test against the kNN+ADWIN method with the PAW.")
+    parser.add_argument('--do_sam_knn', action='store_true', help="Test against the SAM-kNN method.")
 
     parser.add_argument('--incremental_step', type=int, default=1,
                         help="The number of samples to be added at each incremental step.")
@@ -258,7 +265,7 @@ def generate_dataloader(
         sampler=batch_sampler,
         num_workers=flags.num_readers
     )
-    print(f"The number of samples within the dataset are {len(dataset)}")
+    print(f"The number of samples within the dataset is {len(dataset)}")
     return dataloader, batch_sampler, len(dataset), splits_length if splits_length else [len(dataset)]
 
 
@@ -408,7 +415,7 @@ def extract_training_features(
     :param num_samples_per_class: the number of samples
     :return: the first samples of each class (and their labels) up to the desired number.
     """
-    assert num_samples_per_class * np.size(np.unique(training_labels)) <= np.size(training_labels),\
+    assert num_samples_per_class * np.size(np.unique(training_labels)) <= np.size(training_labels), \
         "The number of samples per class multiplied by the number of classes should be " \
         "smaller or equal the number of samples"
     # Compute the indices to keep
@@ -418,6 +425,33 @@ def extract_training_features(
     # Join all the arrays together
     idx_to_keep = np.sort(np.concatenate(idx_to_keep))
     return training_features[idx_to_keep], training_labels[idx_to_keep]
+
+
+def extract_next_data(
+        test_iterator: Iterator, time_results_dict: dict, base_cnn: Callable, dimred_: Callable, current_idx: int
+) -> Tuple[np.ndarray, torch.Tensor]:
+    """
+    An utility function that extracts the features in input to the kNN-based classifier and the corresponding label
+    for the subsequent and optional testing/adaptation.
+    :param test_iterator: the dataset iterator.
+    :param time_results_dict: the dictionary where to store the extraction time statistics at the keys "dl" and "fe_dr".
+        It is assumed that at those keys there is an array of shape (num_tested_cases, ).
+    :param base_cnn: the feature extractor PyTorch module.
+    :param dimred_: the dimensionality reduction callable.
+    :param current_idx: the index at where store the time statistics within the time_results_dict.
+    :return: a Tuple containing the features and the label as properly shaped numpy arrays.
+    """
+    # Get the sample
+    st_time = time.time()
+    im_, lb_ = next(test_iterator)
+    time_results_dict["dl"][current_idx] += time.time() - st_time
+    # Compute feature extractor + dimensionality reduction
+    st_time = time.time()
+    ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
+    ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
+    time_results_dict["fe_dr"][current_idx] += time.time() - st_time
+
+    return ft_, lb_
 
 
 def generate_cnn(
@@ -486,6 +520,7 @@ def generate_dimensionality_reduction_operator(
 def main(flags: argparse.Namespace) -> None:
     """
     Main function.
+    :type flags: argparse.Namespace
     :param flags: the namespace of argparse with the parameters.
     :return: Nothing.
     """
@@ -727,14 +762,13 @@ def main(flags: argparse.Namespace) -> None:
 
             for jj in tqdm(range(num_test_samples)):
                 # Get the sample
-                st_time = time.time()
-                im_, lb_ = next(test_iterator)
-                test_time["dl"][ii] += time.time() - st_time
-                # Compute feature extractor + dimensionality reduction
-                st_time = time.time()
-                ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
-                ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
-                test_time["fe_dr"] += time.time() - st_time
+                ft_, lb_ = extract_next_data(
+                    test_iterator=test_iterator,
+                    time_results_dict=test_time,
+                    base_cnn=base_cnn,
+                    dimred_=dimred_,
+                    current_idx=ii
+                )
                 # KNN Classification
                 st_time = time.time()
                 pred_ = knn_.predict_proba(ft_)
@@ -913,7 +947,7 @@ def main(flags: argparse.Namespace) -> None:
         incremental_samples = np.arange(flags.num_classes, flags.num_classes * np.max(samples_per_class_to_test),
                                         flags.incremental_step)
         if np.size(incremental_samples) < num_incremental_comparisons:
-            incremental_samples.resize((num_incremental_comparisons, ))
+            incremental_samples.resize((num_incremental_comparisons,))
         df_ = pd.DataFrame({
             "samples": incremental_samples,
             "a_knn": accuracy_incremental["knn"]
@@ -1006,6 +1040,9 @@ def main(flags: argparse.Namespace) -> None:
             "hybrid": np.zeros((num_hybrid_cases, num_comparisons, num_test_samples)),
         }
 
+    # Store the permutation sequences for further usage.
+    perm_idxs_dict = dict()
+
     # Start experiments
     if flags.do_passive or flags.do_active:
         for ii, samples_per_class in enumerate(tqdm(samples_per_class_to_test)):
@@ -1033,6 +1070,7 @@ def main(flags: argparse.Namespace) -> None:
 
             # Create the permutation indices (to have all equals in all the objects)
             perm_idxs = np.random.permutation(training_features.shape[0])
+            perm_idxs_dict[ii] = perm_idxs
 
             if flags.do_passive:
                 # Create the condensed kNN object. The number of neighbors is automatically computed.
@@ -1088,7 +1126,7 @@ def main(flags: argparse.Namespace) -> None:
                 # Create the various hybrid Tiny kNN objects.
                 hybrid_tiny_knn_list = list()
                 hybrid_tiny_knn_idx = 0
-                # Note that cdt_metric_list, etc are the same of active case
+                # Note that cdt_metric_list, etc. are the same of active case
                 cdt_arguments_dict_list = [{"allow_above_p0": False}, {"allow_above_mu0": False}]
                 for _cdt_metric, _cdt_init_fn, _cdt_args in zip(
                         cdt_metric_list, cdt_metric_init_fn_list, cdt_arguments_dict_list
@@ -1122,14 +1160,13 @@ def main(flags: argparse.Namespace) -> None:
 
             for jj in tqdm(range(num_test_samples)):
                 # Get the sample
-                st_time = time.time()
-                im_, lb_ = next(test_iterator)
-                test_time_tiny["dl"][ii] += time.time() - st_time
-                # Compute feature extractor + dimensionality reduction
-                st_time = time.time()
-                ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
-                ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
-                test_time_tiny["fe_dr"] += time.time() - st_time
+                ft_, lb_ = extract_next_data(
+                    test_iterator=test_iterator,
+                    time_results_dict=test_time,
+                    base_cnn=base_cnn,
+                    dimred_=dimred_,
+                    current_idx=ii
+                )
 
                 if flags.do_passive:
                     # Predict condensed knn
@@ -1158,7 +1195,8 @@ def main(flags: argparse.Namespace) -> None:
                             st_time = time.time()
                             # Check if there is a prediction for each class: fill with -1 otherwise
                             if np.size(pred_proba) < flags.num_classes:
-                                pred_proba = np.append(pred_proba, -1 * np.ones(flags.num_classes - np.size(pred_proba)))
+                                pred_proba = \
+                                    np.append(pred_proba, -1 * np.ones(flags.num_classes - np.size(pred_proba)))
                             pred_lbs_ = kac_.predict(ft_, y_true=lb_.data.numpy())
                             test_time_tiny[_key][ii] += time.time() - st_time
                             # errors_active[kk, jj] = (not pred_lbs_ == lb_.data.numpy())
@@ -1246,6 +1284,234 @@ def main(flags: argparse.Namespace) -> None:
                     os.path.join(flags.output_dir, f"cdt_refined_{alg_name}_seed_{flags.seed}"),
                     cdt_refined_tiny[alg_name]
                 )
+
+    ####################################################################################################################
+    # Other methods from related literature experiments.
+    # todo: improve this description by adding the reference to the papers and more insightful details.
+    # The kNN+ADWIN updates the knowledge set of the kNN when the ADWIN CDT detects a change.
+    # The kNN+ADWIN with PAW updates the knowledge set of the KNN as kNN+ADWIN but introduces the Probabilist Adaptive
+    # Window (PAW) to removes redundant knowledge.
+    # The SAM-kNN imitates the short term and long term memory in human brain.
+    ####################################################################################################################
+    accuracy_soa = {
+        "knn_adwin": np.zeros(num_comparisons),
+        "knn_adwin_paw": np.zeros(num_comparisons),
+        "knn_sam": np.zeros(num_comparisons),
+    }
+    predictions_soa = {
+        "knn_adwin": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
+        "knn_adwin_paw": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
+        "knn_sam": np.zeros((num_comparisons, num_test_samples, flags.num_classes)),
+    }
+    errors_soa = {
+        "knn_adwin": np.zeros((num_comparisons, num_test_samples)),
+        "knn_adwin_paw": np.zeros((num_comparisons, num_test_samples)),
+        "knn_sam": np.zeros((num_comparisons, num_test_samples)),
+    }
+    train_time_soa = {
+        "knn_adwin": np.zeros(num_comparisons),
+        "knn_adwin_paw": np.zeros(num_comparisons),
+        "knn_sam": np.zeros(num_comparisons),
+    }
+    test_time_soa = {
+        "dl": np.zeros(num_comparisons),
+        "fe_dr": np.zeros(num_comparisons),
+        "knn_adwin": np.zeros(num_comparisons),
+        "knn_adwin_paw": np.zeros(num_comparisons),
+        "knn_sam": np.zeros(num_comparisons),
+    }
+    samples_soa = {
+        "knn_adwin": np.zeros((num_comparisons, num_test_samples + 1)),
+        "knn_adwin_paw": np.zeros((num_comparisons, num_test_samples + 1)),
+        "knn_sam": np.zeros((num_comparisons, num_test_samples + 1)),
+    }
+    # cdt_metric_soa = {
+    #     "knn_adwin": np.zeros((num_comparisons, num_test_samples)),
+    #     "knn_adwin_paw": np.zeros((num_comparisons, num_test_samples)),
+    #     "knn_sam": np.zeros((num_comparisons, num_test_samples)),
+    # }
+    # cdt_detection_soa = {
+    #     "knn_adwin": np.zeros((num_comparisons, num_test_samples)),
+    #     "knn_adwin_paw": np.zeros((num_comparisons, num_test_samples)),
+    #     "knn_sam": np.zeros((num_comparisons, num_test_samples)),
+    # }
+    # cdt_refined_soa = {
+    #     "knn_adwin": np.zeros((num_comparisons, num_test_samples)),
+    #     "knn_adwin_paw": np.zeros((num_comparisons, num_test_samples)),
+    #     "knn_sam": np.zeros((num_comparisons, num_test_samples)),
+    # }
+
+    # Start experiments
+    if flags.do_knn_adwin or flags.do_knn_adwin_paw or flags.do_sam_knn:
+        # Define get_samples functions
+        def get_knn_adwin_samples(knn: river.neighbors.knn_adwin.KNNADWINClassifier):
+            return knn.data_window.size
+
+        def get_knn_sam_samples(knn: river.neighbors.sam_knn.SAMKNNClassifier):
+            return len(knn.STMLabels) + len(knn.LTMLabels)
+
+        # Experiments
+        for ii, samples_per_class in enumerate(tqdm(samples_per_class_to_test)):
+            # Extract the features with the current number of classes.
+            training_features, training_labels = \
+                extract_training_features(
+                    training_features=training_features_all,
+                    training_labels=training_labels_all,
+                    num_samples_per_class=samples_per_class
+                )
+
+            # Train dimensionality reduction operator, if any.
+            if dr_to_train:
+                dimred_, training_features, training_labels, _ = \
+                    learn_dimred(
+                        dr_args=dr_args,
+                        train_features=training_features,
+                        train_labels=training_labels,
+                        num_classes=flags.num_classes,
+                        features_shape=features_shape
+                    )
+            else:
+                # Define dimred as the identity.
+                dimred_ = identity_dimred_
+
+            # DISCLAIMER: The number of neighbors is here fixed in a similar way to the proposed algorithms, i.e.,
+            # to the ceiling of the square root of the number of sampling.
+            # Similarly, the window size (when available) is sized as per active tiny knn. Note that w_len has been
+            # already computed at this stage, independently of the flag do_active.
+            num_neighbors = int(np.ceil(np.sqrt(samples_per_class)))
+
+            # Create the permutation indices if not already created.
+            perm_idxs = \
+                perm_idxs_dict[ii] if ii in perm_idxs_dict else np.random.permutation(training_features.shape[0])
+            training_features = training_features[perm_idxs]
+            training_labels = training_labels[perm_idxs]
+
+            knn_soa_to_test = list()
+            knn_soa_keys = list()
+            knn_soa_get_samples_fn = list()
+
+            # Fit the algorithm(s)
+            if flags.do_knn_adwin:
+                start_time = time.time()
+                knn_adwin = river.neighbors.knn_adwin.KNNADWINClassifier(
+                    n_neighbors=num_neighbors,
+                    window_size=w_len,
+                    p=2  # Euclidean distance as distance metric
+                )
+                # Call partial_fit with initial training data. There is no other way than call sample by sample!
+                for _x, _y in zip(training_features, training_labels):
+                    knn_adwin.learn_one({ii: v for ii, v in enumerate(_x)}, _y)
+                train_time_soa["knn_adwin"] = time.time() - start_time
+                # todo: check if there is another way than accessing the single attributes
+                samples_soa["knn_adwin"][ii, 0] = get_knn_adwin_samples(knn_adwin)
+                knn_soa_to_test.append(knn_adwin)
+                knn_soa_keys.append("knn_adwin")
+                knn_soa_get_samples_fn.append(get_knn_adwin_samples)
+            if flags.do_knn_adwin_paw:
+                print("KNN ADWIN PAW not supported yet.")
+            if flags.do_sam_knn:
+                start_time = time.time()
+                knn_sam = river.neighbors.sam_knn.SAMKNNClassifier(
+                    n_neighbors=num_neighbors,
+                    window_size=w_len
+                    # Default for other params.
+                    # todo: check distance_weighting param meaning!
+                )
+                # Call partial_fit with initial training data. There is no other way than call sample by sample!
+                for _x, _y in zip(training_features, training_labels):
+                    knn_sam.learn_one({ii: v for ii, v in enumerate(_x)}, _y)
+                train_time_soa["knn_sam"] = time.time() - start_time
+                # todo: check if there is another way than accessing the single attributes
+                samples_soa["knn_sam"][ii, 0] = get_knn_sam_samples(knn_sam)
+                knn_soa_to_test.append(knn_sam)
+                knn_soa_keys.append("knn_sam")
+                knn_soa_get_samples_fn.append(get_knn_sam_samples)
+
+            # Skip training samples by updating the sampler
+            batch_sampler.update_start(start=num_test_dataloader_samples_to_skip)
+            test_iterator = iter(dataloader)
+
+            for jj in tqdm(range(num_test_samples)):
+                # Get the sample
+                ft_, lb_ = extract_next_data(
+                    test_iterator=test_iterator,
+                    time_results_dict=test_time,
+                    base_cnn=base_cnn,
+                    dimred_=dimred_,
+                    current_idx=ii
+                )
+
+                # Create a dict from ft_
+                ft_dict = {ii: v for ii, v in enumerate(_x)}
+
+                # if flags.do_knn_adwin or flags.do_knn_sam:
+                for kac_, _key, _get_samples in zip(knn_soa_to_test, knn_soa_keys, knn_soa_get_samples_fn):
+                    try:
+                        pred_proba = kac_.predict_proba_one(ft_dict)
+                        #  The predict_proba_one method returns a dict {label: prob} where the probability is computed
+                        # and weighted by the distance of each neighbor.
+                        # Convert the dict to a numpy array assuming that the labels are ordered indices.
+                        pred_proba = np.array([pred_proba[x] for x in sorted(pred_proba.keys())])
+                    except NotImplementedError:
+                        pred_proba = np.zeros(flags.num_classes)
+                        pred_proba[kac_.predict_one(ft_dict)] = 1
+                    st_time = time.time()
+                    # Check the case where there is no probability
+                    if np.sum(pred_proba) == 0:
+                        pred_proba -= 1
+                        pred_lbs_ = -1
+                    else:
+                        # Check if there is a prediction for each class: fill with -1 otherwise
+                        if np.size(pred_proba) < flags.num_classes:
+                            pred_proba = \
+                                np.append(pred_proba, -1 * np.ones(flags.num_classes - np.size(pred_proba)))
+                        pred_lbs_ = np.argmax(pred_proba)
+                    test_time_soa[_key][ii] += time.time() - st_time
+                    errors_soa[_key][ii, jj] = (not pred_lbs_ == lb_.data.numpy())
+                    predictions_soa[_key][ii, jj] = pred_proba
+                    samples_soa[_key][ii, jj] = _get_samples(kac_)
+
+            # Save results
+            for alg_name in accuracy_soa:
+                accuracy_soa[alg_name][ii] = 1 - np.sum(errors_soa[alg_name][ii]) / num_test_samples
+            # accuracy_soa["knn_adwin"][ii] = 1 - np.sum(errors_soa["knn_adwin"][ii]) / num_test_samples
+            # accuracy_soa["knn_adwin_paw"][ii] = 1 - np.sum(errors_soa["knn_adwin_paw"][ii]) / num_test_samples
+            # accuracy_soa["knn_sam"][ii] = 1 - np.sum(errors_soa["knn_sam"][ii]) / num_test_samples
+
+            # Remove useless data structures.
+            del training_features
+            del training_labels
+            knn_soa_to_test.clear()
+            knn_soa_keys.clear()
+            knn_soa_get_samples_fn.clear()
+
+        # After the evaluation, the results are saved to file.
+        o_dict_soa = {
+            "samples_per_class": samples_per_class_to_test,
+        }
+        for alg_name in accuracy_soa:
+            o_dict_soa[f"a_{alg_name}"] = accuracy_soa[alg_name]
+            o_dict_soa[f"tr_{alg_name}"] = train_time_soa[alg_name]
+        for alg_name in test_time_soa:
+            o_dict_soa[f"te_{alg_name}"] = test_time_soa[alg_name]
+
+        df_soa = pd.DataFrame(o_dict_soa)
+        print("State of the Art Accuracy stats: ")
+        print(df_soa.tail())
+
+        df_soa.to_csv(
+            os.path.join(flags.output_dir, f"results_soa_{flags.seed}.csv"),
+            float_format="%.3f"
+        )
+        for alg_name in predictions_soa:
+            np.save(
+                os.path.join(flags.output_dir, f"predictions_{alg_name}_seed_{flags.seed}"),
+                predictions_soa[alg_name]
+            )
+            np.save(
+                os.path.join(flags.output_dir, f"samples_{alg_name}_seed_{flags.seed}"),
+                samples_soa[alg_name]
+            )
 
 
 if __name__ == "__main__":
