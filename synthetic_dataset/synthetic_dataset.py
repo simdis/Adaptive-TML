@@ -3,6 +3,8 @@ from typing import Optional, Union, Tuple, Callable
 import numpy as np
 import torch.utils.data.dataset
 
+import scipy.stats
+
 
 class SyntheticMultivariateNormalGridDataset(torch.utils.data.dataset.Dataset):
     """
@@ -175,14 +177,23 @@ class SyntheticMultivariateNormalGridDataset(torch.utils.data.dataset.Dataset):
                 else:
                     self._classes_cov[:, :, zz] = np.diag(diagonals[:, zz] * std_scale[zz] + std_min[zz])
         else:
-            base_matrix = \
-                self._rg.random(
-                    (self._grid_size * self._grid_size, self._grid_size * self._grid_size, self._num_classes)
-                )
-            # Now that a matrix has been created, convert it to a valid covariance matrix (positive semidefinite).
-            for zz, _m in enumerate(base_matrix.transpose()):
-                self._classes_cov[:, :, zz] = 0.5 * (_m.transpose() + _m)
-                self._classes_cov[:, :, zz] += self._grid_size ** 2 * np.diag(np.ones(self._grid_size ** 2))
+            is_positive_definite = False
+            while not is_positive_definite:
+                # Create randomly the base matrix
+                base_matrix = self._rg.random((self._grid_size * self._grid_size, self._grid_size * self._grid_size))
+                # Convert the matrix into a positive semidefinite matrix.
+                base_matrix = 0.5 * (base_matrix.transpose() + base_matrix)
+                base_matrix += self._grid_size * self._grid_size * np.diag(np.ones(self._grid_size * self._grid_size))
+                is_positive_definite = np.all(np.linalg.eigvals(base_matrix) > 0)
+            # Create the matrices from an Inverse Wishart distribution
+            cov_matrices = scipy.stats.invwishart(
+                df=self._grid_size * self._grid_size * 2,
+                scale=base_matrix,
+                seed=self._rg
+            ).rvs(self._num_classes)
+            # Now that the covariance matrices have been created, save them.
+            for zz, _m in enumerate(cov_matrices):
+                self._classes_cov[:, :, zz] = _m
 
     def _shift_classes(self, mean_shift: Union[float, np.ndarray], std_shift: Union[float, np.ndarray]):
         """
