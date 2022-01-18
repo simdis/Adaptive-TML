@@ -149,8 +149,12 @@ class AdaptiveNearestNeighbor:
         :return: Nothing.
         """
         # Initialize CDT data structures
-        self._alpha, self._beta, self._gamma_0, self._gamma_1 = \
-            self._cdt_init_fn(self._init_sequence, **self._cdt_init_kwargs)
+        if self._cdt_init_kwargs is not None:
+            self._alpha, self._beta, self._gamma_0, self._gamma_1 = \
+                self._cdt_init_fn(self._init_sequence, **self._cdt_init_kwargs)
+        else:
+            self._alpha, self._beta, self._gamma_0, self._gamma_1 = \
+                self._cdt_init_fn(self._init_sequence)
         self._sjk = np.zeros(0)
         self._gk = np.zeros(0)
         # Stop initialization
