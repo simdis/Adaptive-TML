@@ -16,6 +16,7 @@ import time
 from tqdm import tqdm
 
 import synthetic_dataset.synthetic_dataset
+import synthetic_dataset.rotating_hyperplane_dataset
 from audio_utils import transforms as audio_transforms
 from audio_utils import spectrogram_dataloader_pytorch as audio_datasets
 from audio_utils import loaders as audio_loaders
@@ -90,7 +91,9 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
                         help="Cut-off of decibels (default and suggested value is 80db).")
     parser.add_argument('--is_synthetic', action='store_true',
                         help="Boolean flag that forces to use a synthetic dataset "
-                        "(the path to dataset in this case is ignored).")
+                             "(the path to dataset in this case is ignored).")
+    parser.add_argument('--do_rotating', action='store_true',
+                        help="When is_synthetic is provided, use the rotating hyperplane dataset.")
     parser.add_argument('--grid_size', type=int, default=4,
                         help="The size of the synthetic dataset squares.")
     parser.add_argument('--concept_drift_magnitude_mean', type=str, default="0",
@@ -105,7 +108,7 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
                         help="The comma separated minimum possible mean values for each class.")
     parser.add_argument('--synthetic_classes_cov_scale', type=str, default="1.0",
                         help="The comma separated width of possible cov values for each class.")
-    parser.add_argument('--synthetic_classes_cov_min', type=str, default="1.0",
+    parser.add_argument('--synthetic_classes_cov_min', type=str, default="0.5",
                         help="The comma separated minimum possible cov values for each class.")
 
     parser.add_argument('--do_incremental', action='store_true', help="Activate the incremental experiments.")
@@ -162,7 +165,7 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
 
 
 def generate_classes(
-    flags: argparse.Namespace
+        flags: argparse.Namespace
 ) -> Tuple[List[str], List[str]]:
     """
     Part of code that generates the classes.
@@ -210,7 +213,19 @@ def generate_dataloader(
     # Define the dataloader.
     # dataset = None
     splits_length = None
-    if flags.is_synthetic:
+    synthetic_dataset_size = \
+        (flags.base_test_samples + int(max(flags.samples_per_class_to_test.split(',')))) * flags.num_classes * 2
+    if flags.is_synthetic and flags.do_rotating:
+        dataset = synthetic_dataset.rotating_hyperplane_dataset.RotatingHyperplaneGridDataset(
+            grid_size=flags.grid_size,
+            mag_change=0.001,  # Fixed according to related literature
+            noise_percentage=0.01,  # No reference in related literature
+            sigma_percentage=0.01,  # No reference in related literature
+            dataset_size=synthetic_dataset_size,
+            seed=flags.seed * 20,
+            transform=audio_transforms.SpectrogramToColormapTransform()
+        )
+    elif flags.is_synthetic:
         class_mean_scale = np.array(flags.synthetic_classes_mean_scale.split(','))
         class_mean_min = np.array(flags.synthetic_classes_mean_min.split(','))
         class_cov_scale = np.array(flags.synthetic_classes_cov_scale.split(','))
@@ -228,7 +243,7 @@ def generate_dataloader(
         if len(mean_change_magnitude) == 1:
             mean_change_magnitude = float(mean_change_magnitude[0])
         elif len(mean_change_magnitude) == flags.num_classes:
-            mean_change_magnitude = np.array(mean_change_magnitude).reshape((flags.num_classes, ))
+            mean_change_magnitude = np.array(mean_change_magnitude).reshape((flags.num_classes,))
         else:
             mean_change_magnitude = np.array(mean_change_magnitude).reshape(
                 (flags.grid_size, flags.grid_size, flags.num_classes)
@@ -236,7 +251,7 @@ def generate_dataloader(
         if len(cov_change_magnitude) == 1:
             cov_change_magnitude = float(cov_change_magnitude[0])
         elif len(cov_change_magnitude) == flags.num_classes:
-            cov_change_magnitude = np.array(cov_change_magnitude).reshape((flags.num_classes, ))
+            cov_change_magnitude = np.array(cov_change_magnitude).reshape((flags.num_classes,))
         else:
             cov_change_magnitude = np.array(mean_change_magnitude).reshape(
                 (flags.grid_size * flags.grid_size, flags.grid_size * flags.grid_size, flags.num_classes)
@@ -244,12 +259,12 @@ def generate_dataloader(
         dataset = synthetic_dataset.synthetic_dataset.SyntheticMultivariateNormalGridDataset(
             grid_size=flags.grid_size,
             num_classes=flags.num_classes,
-            dataset_size=flags.base_test_samples * flags.num_classes * 2,
+            dataset_size=synthetic_dataset_size,
             mean_change_magnitude=mean_change_magnitude,
             mean_change_duration=flags.concept_drift_time,
             cov_change_magnitude=cov_change_magnitude,
             cov_change_duration=flags.concept_drift_time,
-            change_beginning=flags.base_test_samples * flags.num_classes,
+            change_beginning=synthetic_dataset_size // 2,
             mean_scale=class_mean_scale,
             mean_min=class_mean_min,
             cov_scale=class_cov_scale,
@@ -473,6 +488,51 @@ def compute_training_features(
     return training_features, training_labels, effective_num_of_samples
 
 
+def compute_training_features_nodl(
+        num_training_samples: int, num_classes: int, features_size: int,
+        iterator: Iterator, _verbose: bool = False
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Function that extracts the features of the initial training set without the deep learning part.
+    :param num_training_samples: the number of samples per class to be computed.
+    :param num_classes: the number of classes.
+    :param features_size: the size of the features.
+    :param iterator: the dataloader iterator. It should provides at each iteration a tuple
+        containing the sample and its label.
+    :param _verbose: whether print verbose messages or not.
+    :return: a tuple containing the arrays of training features and labels, plus
+        an integer that contains the number of iterations done.
+    """
+    training_features = np.zeros((num_training_samples * num_classes, features_size))
+    training_labels = np.zeros(num_training_samples * num_classes)
+
+    # Get the training samples from test dataloader, respecting the proportions among classes.
+    effective_num_of_samples = 0
+    ii = 0
+    class_counter = np.ones(num_classes) * num_training_samples
+    tot_images = np.sum(class_counter)
+    while tot_images > 0:
+        # Get the image and its features
+        im_, lb_ = next(iterator)
+        if _verbose:
+            print('Iteration {} -- Label {} -- Class Counter {}'.format(
+                effective_num_of_samples, lb_, class_counter))
+        # Save features and label
+        if class_counter[lb_]:
+            ft_ = torch.flatten(im_)
+            training_features[ii] = ft_.data.numpy()[0]
+            training_labels[ii] = lb_.data.numpy()
+            ii += 1
+            class_counter[lb_] -= 1
+            tot_images -= 1
+            if _verbose:
+                print('Saving! New class counter {}'.format(class_counter))
+        # Count the effective number of samples
+        effective_num_of_samples += 1
+
+    return training_features, training_labels, effective_num_of_samples
+
+
 def extract_training_features(
         training_features: np.ndarray, training_labels: np.ndarray, num_samples_per_class: int
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -597,8 +657,8 @@ def main(flags: argparse.Namespace) -> None:
         print('{} : {}'.format(k, vars(flags)[k]))
 
     # Create output directory, if it does not exist
-    if not os.path.isdir(flags.output_dir):
-        os.mkdir(flags.output_dir)
+    if not os.path.exists(flags.output_dir):
+        os.makedirs(flags.output_dir)
 
     # Fix the seed.
     # todo: replace np.random.seed with a random_generator
@@ -1042,11 +1102,13 @@ def main(flags: argparse.Namespace) -> None:
     ####################################################################################################################
     # Define Active Tiny kNN and Hybrid Tiny kNN configurations to test
     # todo: make this choice available in FLAGS!
-    active_cases = ['accuracy_fast_condensing', 'accuracy_fast', 'confidence_fast_condensing', 'confidence_fast']
+    # active_cases = ['accuracy_fast_condensing', 'accuracy_fast', 'confidence_fast_condensing', 'confidence_fast']
+    active_cases = ['accuracy_fast_condensing', 'accuracy_fast']
     num_active_cases = len(active_cases)
 
     thresholds_to_test = np.array([10, 20, 25, 50, 100])
-    hybrid_names = ['accuracy_fast', 'confidence_fast']
+    # hybrid_names = ['accuracy_fast', 'confidence_fast']
+    hybrid_names = ['accuracy_fast']
     condensing_suffix = ['_condensing', '']
     hybrid_cases = ['{}_{}_{}'.format(nn, cc, tr) for nn in hybrid_names for cc in condensing_suffix for tr in
                     thresholds_to_test if not (nn == 'confidence_fast' and tr < 50)]
@@ -1167,10 +1229,11 @@ def main(flags: argparse.Namespace) -> None:
                 # Create the various active Tiny kNN objects.
                 active_tiny_knn_list = list()
                 active_tiny_knn_idx = 0
-                cdt_metric_list = ['accuracy', 'confidence']
+                # cdt_metric_list = ['accuracy', 'confidence']
+                cdt_metric_list = ['accuracy']
                 cdt_metric_init_fn_list = [
                     active_cdt_functions.initialize_cusum_cdt_accuracy,
-                    active_cdt_functions.initialize_cusum_cdt_change_normal_mean
+                    # active_cdt_functions.initialize_cusum_cdt_change_normal_mean
                 ]
                 _adaptation_mode = 'fast'
                 for _cdt_metric, _cdt_init_fn in zip(cdt_metric_list, cdt_metric_init_fn_list):
@@ -1413,6 +1476,21 @@ def main(flags: argparse.Namespace) -> None:
 
     # Start experiments
     if flags.do_knn_adwin or flags.do_knn_adwin_paw or flags.do_sam_knn:
+        # Recompute the training features only if the dataset is synthetic.
+        if flags.is_synthetic:
+            # Define the features to be used in the following
+            print(f"Synthetic dataset. Recomputing the features without deep learning for SOA algorithms.")
+            test_iterator = iter(dataloader)
+            start_time = time.time()
+            training_features_all, training_labels_all, _ = \
+                compute_training_features_nodl(
+                    num_training_samples=np.max(samples_per_class_to_test),
+                    num_classes=flags.num_classes,
+                    features_size=int(features_size),
+                    iterator=test_iterator
+                )
+            print(f"Features extracted in {time.time() - start_time:.3f} seconds.")
+
         # Define get_samples functions
         def get_knn_adwin_samples(knn: river.neighbors.knn_adwin.KNNADWINClassifier):
             return knn.data_window.size
