@@ -20,7 +20,6 @@ import synthetic_dataset.rotating_hyperplane_dataset
 from audio_utils import transforms as audio_transforms
 from audio_utils import spectrogram_dataloader_pytorch as audio_datasets
 from audio_utils import loaders as audio_loaders
-from cnn import resnet_mg2
 from pytorch_extensions import dataset as image_datasets
 from pytorch_extensions import layers as custom_pytorch_layers
 from pytorch_extensions import sampler
@@ -68,9 +67,9 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
     parser.add_argument('--cnn_fe', default="resnet18",
                         choices=["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"],
                         help="The CNN used as feature extractor.")
-    parser.add_argument('--cnn_fe_weights_path', type=str, required=True,
-                        help="The path to the pth file containing the weights of the CNN FE.")
-    parser.add_argument('--feature_layer', type=str, default='pool1',
+    parser.add_argument('--cnn_fe_weights_path', type=str, default="",
+                        help="The path to the pth file containing the weights of the CNN FE. **deprecated**")
+    parser.add_argument('--feature_layer', type=str, default='maxpool',
                         help="Convolutional Layer at which the features are extracted.")
 
     parser.add_argument('--data_dir', type=str, required=True,
@@ -593,17 +592,20 @@ def generate_cnn(
     :return: the pytorch based feature extractor.
     """
     if require_fix:
-        resnet_mg2.convert_weights_mapping(
-            flags.cnn_fe, flags.cnn_fe_weights_path, flags.cnn_fe_weights_path
-        )
+        # resnet_mg2.convert_weights_mapping(
+        #     flags.cnn_fe, flags.cnn_fe_weights_path, flags.cnn_fe_weights_path
+        # )
+        pass
     if "resnet" in flags.cnn_fe:
-        base_cnn = resnet_mg2.load_resnet(
-            name=flags.cnn_fe,
-            pretrained=True,
-            requires_grad=False,
-            weights_path=flags.cnn_fe_weights_path,
-            num_classes=flags.num_classes
-        )
+        # base_cnn = resnet_mg2.load_resnet(
+        #     name=flags.cnn_fe,
+        #     pretrained=True,
+        #     requires_grad=False,
+        #     weights_path=flags.cnn_fe_weights_path,
+        #     num_classes=flags.num_classes
+        # )
+        # Asks directly for the torchvision model.
+        base_cnn = torchvision.models.resnet18(pretrained=True)
     else:
         raise ValueError(f"Unsupported CNN: {flags.cnn_fe}\n")
 
