@@ -120,6 +120,9 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
     parser.add_argument('--do_knn_adwin_paw', action='store_true',
                         help="Test against the kNN+ADWIN method with the PAW.")
     parser.add_argument('--do_sam_knn', action='store_true', help="Test against the SAM-kNN method.")
+    parser.add_argument('--do_soa_without_dl', action='store_true',
+                        help="Apply the State of the Art algorithms without the feature extractor and the "
+                             "dimensionality reduction operator.")
 
     parser.add_argument('--incremental_step', type=int, default=1,
                         help="The number of samples to be added at each incremental step.")
@@ -215,6 +218,7 @@ def generate_dataloader(
     synthetic_dataset_size = \
         (flags.base_test_samples + int(max(flags.samples_per_class_to_test.split(',')))) * flags.num_classes * 2
     if flags.is_synthetic and flags.do_rotating:
+        print("Creating Rotating Hyperplane Dataset Instance.")
         dataset = synthetic_dataset.rotating_hyperplane_dataset.RotatingHyperplaneGridDataset(
             grid_size=flags.grid_size,
             mag_change=0.001,  # Fixed according to related literature
@@ -273,6 +277,7 @@ def generate_dataloader(
             transform=None
         )
     elif flags.is_audio:
+        print("Creating Speech Command Dataset Instance.")
         # Create the audio transform
         audio_transform = audio_transforms.spectrogram_transforms(
             n_fft=flags.n_fft,
@@ -309,6 +314,7 @@ def generate_dataloader(
             )
             # dataset.__add__(second_dataset)
     else:
+        print("Creating ImageNet Dataset Instance.")
         # Image case
         image_transform = torchvision.transforms.Compose([
             torchvision.transforms.Resize(flags.image_size),
@@ -475,7 +481,7 @@ def compute_training_features(
         # Save features and label
         if class_counter[lb_]:
             ft_ = torch.flatten(cnn_forward_fn(im_, *cnn_forward_args))
-            training_features[ii] = ft_.data.numpy()[0]
+            training_features[ii] = ft_.data.numpy()
             training_labels[ii] = lb_.data.numpy()
             ii += 1
             class_counter[lb_] -= 1
@@ -520,7 +526,7 @@ def compute_training_features_nodl(
         # Save features and label
         if class_counter[lb_]:
             ft_ = torch.flatten(im_)
-            training_features[ii] = ft_.data.numpy()[0]
+            training_features[ii] = ft_.data.numpy()
             training_labels[ii] = lb_.data.numpy()
             ii += 1
             class_counter[lb_] -= 1
@@ -556,7 +562,8 @@ def extract_training_features(
 
 
 def extract_next_data(
-        test_iterator: Iterator, time_results_dict: dict, base_cnn: Callable, dimred_: Callable, current_idx: int
+        test_iterator: Iterator, time_results_dict: dict, base_cnn: Callable, dimred_: Callable, current_idx: int,
+        apply_deep_learning: bool = True
 ) -> Tuple[np.ndarray, torch.Tensor]:
     """
     An utility function that extracts the features in input to the kNN-based classifier and the corresponding label
@@ -567,6 +574,7 @@ def extract_next_data(
     :param base_cnn: the feature extractor PyTorch module.
     :param dimred_: the dimensionality reduction callable.
     :param current_idx: the index at where store the time statistics within the time_results_dict.
+    :param apply_deep_learning: whether to apply the feature extractor and the dimensionality reduction on new data.
     :return: a Tuple containing the features and the label as properly shaped numpy arrays.
     """
     # Get the sample
@@ -574,10 +582,14 @@ def extract_next_data(
     im_, lb_ = next(test_iterator)
     time_results_dict["dl"][current_idx] += time.time() - st_time
     # Compute feature extractor + dimensionality reduction
-    st_time = time.time()
-    ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
-    ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
-    time_results_dict["fe_dr"][current_idx] += time.time() - st_time
+    if apply_deep_learning:
+        st_time = time.time()
+        ft_ = torch.flatten(base_cnn(im_))  # FE with flattening.
+        ft_ = dimred_(ft_.data.numpy().reshape(1, -1))  # DR
+        time_results_dict["fe_dr"][current_idx] += time.time() - st_time
+    else:
+        # The output is simply the input.
+        ft_ = im_.data.numpy()
 
     return ft_, lb_
 
@@ -1120,7 +1132,7 @@ def main(flags: argparse.Namespace) -> None:
     num_hybrid_cases = len(hybrid_cases)
 
     # Fix window length: the maximum value is number of samples per class times the number of classes.
-    w_len = np.max(samples_per_class_to_test) * flags.num_classes
+    w_len = np.max(samples_per_class_to_test) * flags.num_classes * 10
     if flags.window_length < w_len:
         w_len = flags.window_length
 
@@ -1271,7 +1283,7 @@ def main(flags: argparse.Namespace) -> None:
                 ):
                     for _condensing in [True, False]:
                         for _threshold in thresholds_to_test:
-                            if not _cdt_metric == 'confidence' and _threshold < 50:
+                            if not (_cdt_metric == 'confidence' and _threshold < 50):
                                 # Create and fit the object
                                 start_time = time.time()
                                 kac_ = hybrid_tiny_knn.AdaptiveHybridNearestNeighbor(
@@ -1311,17 +1323,15 @@ def main(flags: argparse.Namespace) -> None:
                     st_time = time.time()
                     predicted_label = c_knn_.predict(ft_)
                     test_time_tiny["c_knn"][ii] += time.time() - st_time
-                    # errors_c_knn_[jj] = (not predicted_label == lb_.data.numpy())
-                    errors_tiny["cit"][ii, jj] = (not predicted_label == lb_.data.numpy())
+                    errors_tiny["c_knn"][ii, jj] = (not predicted_label == lb_.data.numpy())
                     predictions_tiny["c_knn"][ii, jj] = c_knn_.predict_proba(ft_)
                     samples_tiny["c_knn"][ii, jj] = c_knn_.get_knn_samples()
                     # Predict passive
+                    predictions_tiny["cit"][ii, jj] = cit_.predict_proba(ft_)  # Proba before possible adaptations!
                     st_time = time.time()
-                    predicted_label = cit_.predict(ft_)
+                    predicted_label = cit_.predict(ft_, y_true=lb_.data.numpy())
                     test_time_tiny["cit"][ii] += time.time() - st_time
-                    # errors_cit_[jj] = (not predicted_label == lb_.data.numpy())
                     errors_tiny["cit"][ii, jj] = (not predicted_label == lb_.data.numpy())
-                    predictions_tiny["cit"][ii, jj] = cit_.predict_proba(ft_)
                     samples_tiny["cit"][ii, jj] = cit_.get_knn_samples()
                 if flags.do_active:
                     # Active and hybrid inner loop:
@@ -1336,7 +1346,7 @@ def main(flags: argparse.Namespace) -> None:
                                 pred_proba = \
                                     np.append(pred_proba, -1 * np.ones(flags.num_classes - np.size(pred_proba)))
                             pred_lbs_ = kac_.predict(ft_, y_true=lb_.data.numpy())
-                            test_time_tiny[_key][ii] += time.time() - st_time
+                            test_time_tiny[_key][kk, ii] += time.time() - st_time
                             # errors_active[kk, jj] = (not pred_lbs_ == lb_.data.numpy())
                             errors_tiny[_key][kk, ii, jj] = (not pred_lbs_ == lb_.data.numpy())
                             predictions_tiny[_key][kk, ii, jj] = pred_proba
@@ -1482,7 +1492,7 @@ def main(flags: argparse.Namespace) -> None:
     # Start experiments
     if flags.do_knn_adwin or flags.do_knn_adwin_paw or flags.do_sam_knn:
         # Recompute the training features only if the dataset is synthetic.
-        if flags.is_synthetic:
+        if flags.is_synthetic and flags.do_soa_without_dl:
             # Define the features to be used in the following
             print(f"Synthetic dataset. Recomputing the features without deep learning for SOA algorithms.")
             test_iterator = iter(dataloader)
@@ -1491,7 +1501,7 @@ def main(flags: argparse.Namespace) -> None:
                 compute_training_features_nodl(
                     num_training_samples=np.max(samples_per_class_to_test),
                     num_classes=flags.num_classes,
-                    features_size=int(features_size),
+                    features_size=int(np.prod(input_shape)),
                     iterator=test_iterator
                 )
             print(f"Features extracted in {time.time() - start_time:.3f} seconds.")
@@ -1591,11 +1601,12 @@ def main(flags: argparse.Namespace) -> None:
                     time_results_dict=test_time,
                     base_cnn=base_cnn,
                     dimred_=dimred_,
-                    current_idx=ii
+                    current_idx=ii,
+                    apply_deep_learning=not (flags.is_synthetic and flags.do_soa_without_dl)
                 )
 
                 # Create a dict from ft_
-                ft_dict = {ii: v for ii, v in enumerate(_x)}
+                ft_dict = {ii: v for ii, v in enumerate(ft_.flatten())}
 
                 # if flags.do_knn_adwin or flags.do_knn_sam:
                 for kac_, _key, _get_samples in zip(knn_soa_to_test, knn_soa_keys, knn_soa_get_samples_fn):

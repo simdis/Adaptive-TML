@@ -113,10 +113,10 @@ class AdaptiveNearestNeighbor:
         :return: Nothing.
         """
         if self._adaptive_neighbors:
-            self._knn = condensing.create_knn(self._last_window_x, self._last_window_y)
+            self._knn = condensing.create_knn(x=self._last_window_x, y=self._last_window_y)
         else:
             self._knn = condensing.create_knn(
-                self._last_window_x, self._last_window_y, k_=self._neighbors
+                x=self._last_window_x, y=self._last_window_y, k_=self._neighbors
             )
         # Update num samples
         self._num_samples = np.size(self._last_window_y)
@@ -219,7 +219,7 @@ class AdaptiveNearestNeighbor:
             # Compute CDT step: 1) update sjk matrix
             self._sjk = active_cdt_functions.update_Sjk_matrix(
                 self._sjk, self._alpha, self._beta,
-                self._gamma_0, self._gamma_1, np.sum(self._cdt_sequence),
+                self._gamma_0, self._gamma_1, float(np.sum(self._cdt_sequence)),
                 active_cdt_functions.compute_loglikelihood_ratio
             )
             # 2) Compute gk value

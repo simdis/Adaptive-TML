@@ -66,7 +66,7 @@ class CondensingInTimeNearestNeighbor(CondensedNearestNeighbor):
         if y_true is not None and y_true != y:
             # Add the supervised information
             self._x = np.concatenate((self._x, x), axis=0)
-            self._y = np.concatenate((self._y, y), axis=0)
+            self._y = np.concatenate((self._y, y_true), axis=0)
             # Check the window length
             self._check_max_samples()
             self._update_knn()
