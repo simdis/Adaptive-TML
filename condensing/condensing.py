@@ -18,7 +18,7 @@ def create_knn(x: np.ndarray, y: np.ndarray, k_: Optional[int] = None) -> neighb
     :return: the kNN classifier fitted on the parameters.
     """
     k_ = int(min(np.ceil(np.sqrt(x.shape[0])), x.shape[0])) if k_ is None else k_
-    return neighbors.KNeighborsClassifier(n_neighbors=k_).fit(x, y)
+    return neighbors.KNeighborsClassifier(n_neighbors=k_, weights="distance").fit(x, y)
 
 
 def apply_condensing(
