@@ -93,7 +93,7 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
                              "(the path to dataset in this case is ignored).")
     parser.add_argument('--do_rotating', action='store_true',
                         help="When is_synthetic is provided, use the rotating hyperplane dataset.")
-    parser.add_argument('--grid_size', type=int, default=4,
+    parser.add_argument('--grid_size', type=int, default=7,
                         help="The size of the synthetic dataset squares.")
     parser.add_argument('--concept_drift_magnitude_mean', type=str, default="0",
                         help="The comma separated magnitude of change per each class mean or a single value for all.")
@@ -105,9 +105,9 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
                         help="The comma separated width of possible mean values for each class.")
     parser.add_argument('--synthetic_classes_mean_min', type=str, default="0.0",
                         help="The comma separated minimum possible mean values for each class.")
-    parser.add_argument('--synthetic_classes_cov_scale', type=str, default="1.0",
+    parser.add_argument('--synthetic_classes_cov_scale', type=str, default="0.5",
                         help="The comma separated width of possible cov values for each class.")
-    parser.add_argument('--synthetic_classes_cov_min', type=str, default="0.5",
+    parser.add_argument('--synthetic_classes_cov_min', type=str, default="0.1",
                         help="The comma separated minimum possible cov values for each class.")
 
     parser.add_argument('--do_incremental', action='store_true', help="Activate the incremental experiments.")
@@ -222,13 +222,14 @@ def generate_dataloader(
             sigma_percentage=0.01,  # No reference in related literature
             dataset_size=synthetic_dataset_size,
             seed=flags.seed * 20,
-            transform=audio_transforms.SpectrogramToColormapTransform()
+            transform=None
         )
     elif flags.is_synthetic:
-        class_mean_scale = np.array(flags.synthetic_classes_mean_scale.split(','))
-        class_mean_min = np.array(flags.synthetic_classes_mean_min.split(','))
-        class_cov_scale = np.array(flags.synthetic_classes_cov_scale.split(','))
-        class_cov_min = np.array(flags.synthetic_classes_cov_min.split(','))
+        print("Creating Synthetic Dataset Instance.")
+        class_mean_scale = np.array(flags.synthetic_classes_mean_scale.split(','), dtype=np.float32)
+        class_mean_min = np.array(flags.synthetic_classes_mean_min.split(','), dtype=np.float32)
+        class_cov_scale = np.array(flags.synthetic_classes_cov_scale.split(','), dtype=np.float32)
+        class_cov_min = np.array(flags.synthetic_classes_cov_min.split(','), dtype=np.float32)
         if len(class_mean_scale) == 1:
             class_mean_scale = float(class_mean_scale)
         if len(class_mean_min) == 1:
@@ -269,7 +270,7 @@ def generate_dataloader(
             cov_scale=class_cov_scale,
             cov_min=class_cov_min,
             seed=flags.seed * 20,
-            transform=audio_transforms.SpectrogramToColormapTransform()
+            transform=None
         )
     elif flags.is_audio:
         # Create the audio transform
@@ -708,10 +709,12 @@ def main(flags: argparse.Namespace) -> None:
     print(f"The extracted features have a shape {features_shape} --> (size {features_size})")
 
     # Compute some constants
-    num_datasets = len(datasets_splits)
+    num_datasets = 2 if flags.is_synthetic else len(datasets_splits)
     num_test_samples = flags.base_test_samples * flags.num_classes * num_datasets
     num_test_dataloader_samples_to_skip = \
         datasets_splits[0] - (num_test_samples // num_datasets)  # Skip only on the first dataset!
+    if flags.is_synthetic:
+        num_test_dataloader_samples_to_skip = datasets_splits[0] - num_test_samples
 
     samples_per_class_to_test = np.array(flags.samples_per_class_to_test.split(','), dtype=int)
     nn_lr0_to_test = np.array(flags.nn_lr_base.split(','), dtype=float)

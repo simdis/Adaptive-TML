@@ -88,7 +88,7 @@ class SyntheticMultivariateNormalGridDataset(torch.utils.data.dataset.Dataset):
             cov=self._classes_cov[:, :, _y],
             size=1
         )
-        return _x.reshape((1, self._grid_size, self._grid_size)), _y
+        return _x.reshape((3, self._grid_size, self._grid_size)), _y
 
     def _create_data(self, mean_change_magnitude: Union[float, np.ndarray] = 1.0, mean_change_duration: int = 1,
                      cov_change_magnitude: Union[float, np.ndarray] = 1.0, cov_change_duration: int = 1,
@@ -116,11 +116,6 @@ class SyntheticMultivariateNormalGridDataset(torch.utils.data.dataset.Dataset):
         # Create samples after change
         after_change_samples = dataset_size - change_beginning - max(mean_change_duration, cov_change_duration)
         self._data += [self._generate_one_sample() for _ in range(after_change_samples)]
-
-        # Normalize data
-        data_mean = sum(x[0] for x in self._data) / len(self._data)
-        data_std = np.sqrt(sum((x[0] - data_mean) ** 2 for x in self._data))
-        self._data = [((x[0] - data_mean) / data_std, x[1]) for x in self._data]
 
     def _set_rg(self, random_generator: Optional[np.random.Generator] = None) -> None:
         """
@@ -165,10 +160,10 @@ class SyntheticMultivariateNormalGridDataset(torch.utils.data.dataset.Dataset):
             assert (isinstance(_par, float) or
                     (isinstance(_par, np.ndarray) and np.size(_par) == self._num_classes)), \
                 f"The {_name} parameter should be either float or an array of shape ({self._num_classes}, )."
-        self._classes_mean = self._rg.random((self._grid_size * self._grid_size, self._num_classes))
+        self._classes_mean = self._rg.random((3 * self._grid_size * self._grid_size, self._num_classes))
         self._classes_mean = self._classes_mean * mean_scale + mean_min
         self._classes_cov = \
-            np.zeros((self._grid_size * self._grid_size, self._grid_size * self._grid_size, self._num_classes))
+            np.zeros((3 * self._grid_size * self._grid_size, 3 * self._grid_size * self._grid_size, self._num_classes))
         if independent_dimensions:
             diagonals = self._rg.random(self._classes_mean.shape)
             for zz, _ in enumerate(diagonals.transpose()):
@@ -180,14 +175,16 @@ class SyntheticMultivariateNormalGridDataset(torch.utils.data.dataset.Dataset):
             is_positive_definite = False
             while not is_positive_definite:
                 # Create randomly the base matrix
-                base_matrix = self._rg.random((self._grid_size * self._grid_size, self._grid_size * self._grid_size))
+                base_matrix = \
+                    self._rg.random((3 * self._grid_size * self._grid_size, 3 * self._grid_size * self._grid_size))
                 # Convert the matrix into a positive semidefinite matrix.
                 base_matrix = 0.5 * (base_matrix.transpose() + base_matrix)
-                base_matrix += self._grid_size * self._grid_size * np.diag(np.ones(self._grid_size * self._grid_size))
+                base_matrix += \
+                    3 * self._grid_size * self._grid_size * np.diag(np.ones(3 * self._grid_size * self._grid_size))
                 is_positive_definite = np.all(np.linalg.eigvals(base_matrix) > 0)
             # Create the matrices from an Inverse Wishart distribution
             cov_matrices = scipy.stats.invwishart(
-                df=self._grid_size * self._grid_size * 2,
+                df=self._grid_size * self._grid_size * 6,
                 scale=base_matrix,
                 seed=self._rg
             ).rvs(self._num_classes)

@@ -13,7 +13,7 @@ class RotatingHyperplaneGridDataset(torch.utils.data.dataset.Dataset):
     squared data.
     """
     def __init__(self, grid_size: int, dataset_size: int = 1000,
-                 n_drift_features: int = 2, mag_change: float = 0.0,
+                 n_drift_features: int = 4, mag_change: float = 0.0,
                  noise_percentage: float = 0.01, sigma_percentage: float = 0.01,
                  transform: Optional[Callable] = None,
                  target_transform: Optional[Callable] = None,
@@ -22,7 +22,7 @@ class RotatingHyperplaneGridDataset(torch.utils.data.dataset.Dataset):
         The init method of Rotating Hyperplane Grid Dataset with 2 classes and
         :param grid_size: The size of the square (>= 2).
         :param dataset_size: The number of generated samples.
-        :param n_drift_features: The number of features that drifts (2 <= n_drift_features <= grid_size ^ 2).
+        :param n_drift_features: The number of features that drifts (2 <= n_drift_features <= 3 * grid_size ^ 2).
         :param mag_change: The magnitude of change for every example (from 0 to 1).
         :param noise_percentage: The percentage of noise in every sample (from 0 to 1).
         :param sigma_percentage: The probability of reverting the change direction (from 0 to 1).
@@ -39,7 +39,7 @@ class RotatingHyperplaneGridDataset(torch.utils.data.dataset.Dataset):
         self._seed = seed
         # Create the data
         self._data_generator = skmultiflow.data.HyperplaneGenerator(
-            n_features=self._grid_size * self._grid_size,
+            n_features=3 * self._grid_size * self._grid_size,
             n_drift_features=n_drift_features,
             mag_change=mag_change,
             noise_percentage=noise_percentage,
@@ -71,7 +71,7 @@ class RotatingHyperplaneGridDataset(torch.utils.data.dataset.Dataset):
         :return: a tuple with the sample and its label
         """
         _x, _y = self._data_generator.next_sample()
-        return _x.reshape((1, self._grid_size, self._grid_size)), int(_y)
+        return _x.reshape((3, self._grid_size, self._grid_size)), int(_y)
 
     def _create_data(self, dataset_size: int = 1000) -> None:
         # Create samples before change
