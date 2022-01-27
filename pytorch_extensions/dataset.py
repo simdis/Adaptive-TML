@@ -26,13 +26,13 @@ class ImageFolderWithClassSelection(torchvision.datasets.folder.ImageFolder):
         :param get_filenames: a boolean flag. If true, the filename is provided along with the input and its label.
         :param class_names: the list of classes to be kept within the dataset folder.
         """
+        self.class_names = class_names
+        self.get_filenames = get_filenames
         super(ImageFolderWithClassSelection, self).__init__(
             root=root, loader=torchvision.datasets.folder.default_loader,
             transform=transform, target_transform=target_transform,
             is_valid_file=is_valid_file
         )
-        self.get_filenames = get_filenames
-        self.class_names = class_names
 
     def __getitem__(self, index: int) -> Union[Tuple[Any, Any], Tuple[Any, Any, str]]:
         """

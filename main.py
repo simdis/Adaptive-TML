@@ -197,7 +197,7 @@ def generate_classes(
     print('The class(es) after the change is/are {}, and {}.'.format(
         ', '.join(classes_after_change[:-1]), classes_after_change[-1])
     )
-    return classes_before_change, classes_before_change
+    return classes_before_change, classes_after_change
 
 
 def generate_dataloader(
@@ -314,7 +314,7 @@ def generate_dataloader(
             )
             # dataset.__add__(second_dataset)
     else:
-        print("Creating ImageNet Dataset Instance.")
+        print("Creating Image Dataset Instance.")
         # Image case
         image_transform = torchvision.transforms.Compose([
             torchvision.transforms.Resize(flags.image_size),
