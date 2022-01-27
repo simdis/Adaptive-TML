@@ -181,8 +181,8 @@ def generate_classes(
         num_classes=flags.num_classes + flags.classes_to_change + flags.classes_to_add
     )
     if flags.classes_to_change or flags.classes_to_add:
-        classes_before_change = all_classes[:flags.num_classes]
-        classes_after_change = all_classes[:flags.num_classes]
+        classes_before_change = [x for x in all_classes[:flags.num_classes]]
+        classes_after_change = [x for x in all_classes[:flags.num_classes]]
         for ii in range(flags.classes_to_change):
             classes_after_change[ii] = all_classes[flags.num_classes + ii]
         for ii in range(flags.classes_to_add):
@@ -242,8 +242,8 @@ def generate_dataloader(
             class_cov_scale = float(class_cov_scale)
         if len(class_cov_min) == 1:
             class_cov_min = float(class_cov_min)
-        mean_change_magnitude = flags.concept_drift_magnitude_mean.split(',')
-        cov_change_magnitude = flags.concept_drift_magnitude_cov.split(',')
+        mean_change_magnitude = np.array(flags.concept_drift_magnitude_mean.split(','), dtype=np.float32)
+        cov_change_magnitude = np.array(flags.concept_drift_magnitude_cov.split(','), dtype=np.float32)
         if len(mean_change_magnitude) == 1:
             mean_change_magnitude = float(mean_change_magnitude[0])
         elif len(mean_change_magnitude) == flags.num_classes:
@@ -1630,6 +1630,8 @@ def main(flags: argparse.Namespace) -> None:
                             pred_proba = \
                                 np.append(pred_proba, -1 * np.ones(flags.num_classes - np.size(pred_proba)))
                         pred_lbs_ = np.argmax(pred_proba)
+                    # Learning step
+                    kac_.learn_one(ft_dict, int(lb_.data.numpy()))
                     test_time_soa[_key][ii] += time.time() - st_time
                     errors_soa[_key][ii, jj] = (not pred_lbs_ == lb_.data.numpy())
                     predictions_soa[_key][ii, jj] = pred_proba
