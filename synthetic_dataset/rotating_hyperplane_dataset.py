@@ -76,7 +76,7 @@ class RotatingHyperplaneGridDataset(torch.utils.data.dataset.Dataset):
     def _create_data(self, dataset_size: int = 1000) -> None:
         # Create samples before change
         self._data = [self._generate_one_sample() for _ in range(dataset_size)]
-        # Normalize data
-        data_mean = sum(x[0] for x in self._data) / len(self._data)
-        data_std = np.sqrt(sum((x[0] - data_mean) ** 2 for x in self._data))
-        self._data = [((x[0] - data_mean) / data_std, x[1]) for x in self._data]
+        # # Normalize data
+        # data_mean = sum(x[0] for x in self._data) / len(self._data)
+        # data_std = np.sqrt(sum((x[0] - data_mean) ** 2 for x in self._data))
+        # self._data = [((x[0] - data_mean) / data_std, x[1]) for x in self._data]
