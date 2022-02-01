@@ -19,6 +19,7 @@ import synthetic_dataset.synthetic_dataset
 import synthetic_dataset.rotating_hyperplane_dataset
 from audio_utils import transforms as audio_transforms
 from audio_utils import spectrogram_dataloader_pytorch as audio_datasets
+from audio_utils import spectrogram_dataloader_noisy_pytorch as noisy_audio_datasets
 from audio_utils import loaders as audio_loaders
 from pytorch_extensions import dataset as image_datasets
 from pytorch_extensions import layers as custom_pytorch_layers
@@ -82,12 +83,31 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
 
     parser.add_argument('--image_size', type=int, default=224)
     parser.add_argument('--is_audio', action='store_true', help="Boolean flag that switches among image and audio.")
+    parser.add_argument('--add_audio_noise', action='store_true',
+                        help="Boolean flag that add noise to audio after change.")
     parser.add_argument('--audio_seconds', type=int, default=1, help="Length of audio waves.")
     parser.add_argument('--sample_rate', type=int, default=22050)
     parser.add_argument('--n_fft', type=int, default=512)
     parser.add_argument('--hop_length', type=int, default=-1)
     parser.add_argument('--top_db', type=int, default=80,
                         help="Cut-off of decibels (default and suggested value is 80db).")
+    parser.add_argument('--add_reverb', action='store_true',
+                        help="When is_audio and add_audio_noise are true, add reverberation as noise.")
+    parser.add_argument('--add_echo', action='store_true',
+                        help="When is_audio and add_audio_noise are true, add three echos as noise.")
+    parser.add_argument('--add_noise_distortion', action='store_true',
+                        help="When is_audio and add_audio_noise are true, add noise distortion.")
+    parser.add_argument('--noise_distortion', type=float, default=0.80,
+                        help="When is_audio and add_audio_noise are true, distort the noise according to this "
+                             "percentage: 1 means no distortion, <1 slow down audio, >1 speeds up audio.")
+    parser.add_argument('--echo_delay', type=float, default="100",
+                        help="The number of milliseconds after which each echo is added.")
+    parser.add_argument('--echo_decay', type=float, default="0.3",
+                        help="The echo decay.")
+    parser.add_argument('--echo_gain_in', type=float, default=0.7,
+                        help="The echo gain in.")
+    parser.add_argument('--echo_gain_out', type=float, default=0.8,
+                        help="The echo gain out.")
     parser.add_argument('--is_synthetic', action='store_true',
                         help="Boolean flag that forces to use a synthetic dataset "
                              "(the path to dataset in this case is ignored).")
@@ -296,18 +316,40 @@ def generate_dataloader(
             class_names=classes_before_change
         )
         if flags.second_data_dir:
-            # Create the second dataset and join both the datasets.
-            second_dataset = audio_datasets.SpectrogramFolder(
-                root=flags.second_data_dir,
-                loader=audio_loaders.spectrogram_loader_librosa,
-                loader_kwargs={
-                    "sample_rate": flags.sample_rate,
-                    "max_seconds": flags.audio_seconds,
-                },
-                extensions=(".wav", ".mp3"),
-                transform=audio_transform,
-                class_names=classes_after_change
-            )
+            if flags.add_audio_noise:
+                second_dataset = noisy_audio_datasets.SpectrogramNoisyFolder(
+                    root=flags.data_dir,
+                    loader=audio_loaders.spectrogram_loader_librosa,
+                    loader_kwargs={
+                        "sample_rate": flags.sample_rate,
+                        "max_seconds": flags.audio_seconds,
+                    },
+                    extensions=(".wav", ".mp3"),
+                    transform=audio_transform,
+                    class_names=classes_after_change,
+                    noise_steps=flags.concept_drift_time // flags.num_readers + 1,
+                    induce_reverb=flags.add_reverb,
+                    induce_speed_distortion=flags.add_noise_distortion,
+                    speed_distortion=flags.noise_distortion,
+                    induce_echo=flags.add_echo,
+                    echo_gain_in=flags.echo_gain_in,
+                    echo_gain_out=flags.echo_gain_out,
+                    echo_delay=flags.echo_delay,
+                    echo_decay=flags.echo_decay
+                )
+            else:
+                # Create the second dataset and join both the datasets.
+                second_dataset = audio_datasets.SpectrogramFolder(
+                    root=flags.second_data_dir,
+                    loader=audio_loaders.spectrogram_loader_librosa,
+                    loader_kwargs={
+                        "sample_rate": flags.sample_rate,
+                        "max_seconds": flags.audio_seconds,
+                    },
+                    extensions=(".wav", ".mp3"),
+                    transform=audio_transform,
+                    class_names=classes_after_change
+                )
             splits_length = [len(dataset), len(dataset) + len(second_dataset)]
             dataset = torch.utils.data.ConcatDataset(
                 [dataset, second_dataset]
