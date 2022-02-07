@@ -1174,7 +1174,7 @@ def main(flags: argparse.Namespace) -> None:
     num_hybrid_cases = len(hybrid_cases)
 
     # Fix window length: the maximum value is number of samples per class times the number of classes.
-    w_len = np.max(samples_per_class_to_test) * flags.num_classes * 10
+    w_len = np.max(samples_per_class_to_test) * flags.num_classes
     if flags.window_length < w_len:
         w_len = flags.window_length
 
