@@ -1161,16 +1161,16 @@ def main(flags: argparse.Namespace) -> None:
     ####################################################################################################################
     # Define Active Tiny kNN and Hybrid Tiny kNN configurations to test
     # todo: make this choice available in FLAGS!
-    # active_cases = ['accuracy_fast_condensing', 'accuracy_fast', 'confidence_fast_condensing', 'confidence_fast']
-    active_cases = ['accuracy_fast_condensing', 'accuracy_fast']
+    # active_cases = ['accuracy_window_condensing', 'accuracy_window', 'confidence_window_condensing', 'confidence_window']
+    active_cases = ['accuracy_window_condensing', 'accuracy_window']
     num_active_cases = len(active_cases)
 
     thresholds_to_test = np.array([10, 20, 25, 50, 100])
-    # hybrid_names = ['accuracy_fast', 'confidence_fast']
-    hybrid_names = ['accuracy_fast']
+    # hybrid_names = ['accuracy_window', 'confidence_window']
+    hybrid_names = ['accuracy_window']
     condensing_suffix = ['_condensing', '']
     hybrid_cases = ['{}_{}_{}'.format(nn, cc, tr) for nn in hybrid_names for cc in condensing_suffix for tr in
-                    thresholds_to_test if not (nn == 'confidence_fast' and tr < 50)]
+                    thresholds_to_test if not (nn == 'confidence_window' and tr < 50)]
     num_hybrid_cases = len(hybrid_cases)
 
     # Fix window length: the maximum value is number of samples per class times the number of classes.
@@ -1294,7 +1294,7 @@ def main(flags: argparse.Namespace) -> None:
                     active_cdt_functions.initialize_cusum_cdt_accuracy,
                     # active_cdt_functions.initialize_cusum_cdt_change_normal_mean
                 ]
-                _adaptation_mode = 'fast'
+                _adaptation_mode = 'window'
                 for _cdt_metric, _cdt_init_fn in zip(cdt_metric_list, cdt_metric_init_fn_list):
                     for _condensing in [True, False]:
                         # Create and fit the object
@@ -1398,6 +1398,9 @@ def main(flags: argparse.Namespace) -> None:
             if flags.do_passive:
                 accuracy_tiny["c_knn"][ii] = 1 - np.sum(errors_tiny["c_knn"][ii]) / num_test_samples
                 accuracy_tiny["cit"][ii] = 1 - np.sum(errors_tiny["cit"][ii]) / num_test_samples
+                print(f"Accuracy Condensed kNN {accuracy_tiny['c_knn'][ii]:.3f}")
+                print(f"Accuracy CIT {accuracy_tiny['cit'][ii]:.3f} -- Samples {samples_tiny['cit'][ii, 0]} "
+                      f"to {samples_tiny['cit'][ii, -2]}")
 
             if flags.do_active:
                 accuracy_tiny["active"][:, ii] = 1 - np.sum(errors_tiny["active"][:, ii], axis=1) / num_test_samples

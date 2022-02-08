@@ -108,6 +108,8 @@ class AdaptiveHybridNearestNeighbor(AdaptiveNearestNeighbor):
             # Case 1 --> restart init (window adaptation mode)
             if self._adaptation_mode == 'window':
                 self._is_initializing = True
+                # Change initializing window to binomial size.
+                self._init_steps = self._n
             else:
                 # Case 2 --> restart CDT on changed_x and changed_y (fast adaptation mode)
                 self._init_sequence = self._compute_cdt_stat(
