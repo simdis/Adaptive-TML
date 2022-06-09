@@ -182,7 +182,8 @@ class AdaptiveNearestNeighbor:
             # Continue adaptation
             self._last_window_x = self._last_window_x[-num_samples_after_jhat:]
             self._last_window_y = self._last_window_y[-num_samples_after_jhat:]
-            if self._use_condensing:
+            # Condensing is disabled during fast adaptation mode, otherwise the estimated accuracy will result 1.
+            if self._use_condensing and not self._adaptation_mode == 'fast':
                 # Apply condensing to the new data
                 self._last_window_x, self._last_window_y = condensing.apply_condensing(
                     x=self._last_window_x,
