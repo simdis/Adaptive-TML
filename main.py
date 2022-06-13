@@ -177,6 +177,9 @@ def define_and_parse_flags(parse: bool = True) -> Union[argparse.ArgumentParser,
     parser.add_argument('--classes_to_add', type=int, default=0,
                         help="Number of classes to add after a change.")
 
+    parser.add_argument('--revert_exps', action='store_true',
+                        help="Revert the experiments, i.e., introduce the change immediately and then remove it [Only for audio].")
+
     # Return the parser or the parsed values according to the parameter 'parse'.
     if parse:
         args = parser.parse_args()
@@ -350,11 +353,17 @@ def generate_dataloader(
                     transform=audio_transform,
                     class_names=classes_after_change
                 )
-            splits_length = [len(dataset), len(dataset) + len(second_dataset)]
-            dataset = torch.utils.data.ConcatDataset(
-                [dataset, second_dataset]
-            )
-            # dataset.__add__(second_dataset)
+            if flags.revert_exps:
+                splits_length = [len(second_dataset), len(dataset) + len(second_dataset)]
+                dataset = torch.utils.data.ConcatDataset(
+                    [second_dataset, dataset]
+                )
+            else:
+                splits_length = [len(dataset), len(dataset) + len(second_dataset)]
+                dataset = torch.utils.data.ConcatDataset(
+                    [dataset, second_dataset]
+                )
+                # dataset.__add__(second_dataset)
     else:
         print("Creating Image Dataset Instance.")
         # Image case
